@@ -1,6 +1,6 @@
 # zcode-tokenspeed（ZCode 插件）
 
-把 [zcode-patcher](https://github.com/linguo2625469/zcode-patcher) 的本地补丁注入能力封装成 ZCode 插件：技能负责执行流程与排障，脚本负责真正改字节。
+ZCode 桌面客户端的本地补丁注入插件：技能负责执行流程与排障，脚本负责真正改字节。
 
 > **非官方项目**，与 ZCode（智谱）官方无任何关联。所有改动均在本地对已安装的客户端打补丁，随时可精确还原。
 
@@ -67,13 +67,6 @@ python "<插件目录>/skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-f
 ```
 
 打完补丁**完全退出并重启 ZCode** 生效。重打包级补丁（TPS / 拉取按钮）在 ZCode 运行中会被文件锁挡住，必须先退出。
-
-## 来源与致谢
-
-本插件封装自 [linguo2625469/zcode-patcher](https://github.com/linguo2625469/zcode-patcher)，后者是两份社区作品的整合：
-
-- [linux.do · 这样的 zcode 太酷辣！（加个状态栏）](https://linux.do/t/topic/2886711) — 作者 **lanvv**：思考等级补丁、TPS 状态栏脚本、Skill 框架
-- [HHQ-666/zcode-model-puller](https://github.com/HHQ-666/zcode-model-puller)（MIT）— 模型拉取按钮前端脚本与思路
 
 ## License
 
