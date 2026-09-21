@@ -6,7 +6,7 @@
 /**
  * ZCode 自定义模型供应商 - 自动拉取模型列表插件 (开源旗舰版)
  * 1. 极致现代视觉：精致高级渐变质感按钮（自适应深浅主题、悬停微光与物理动效）
- * 2. 100% 精准识别：外部已展示模型标注「已添加」并不勾选，未展示新模型标注「新模型」并默认勾选
+ * 2. 100% 精准识别：config 已有模型标注「已添加」并不勾选，新模型标注「新模型」并默认勾选（以 config.json 为唯一事实源）
  * 3. 完美交互：滚动位置丝毫不动，搜索就地过滤
  * 4. 自动原生刷新：保存后自动触发官方刷新与组件重新装载，新模型卡片秒级呈现
  * 5. 跨进程安全 IPC 桥梁：原生无 CORS 限制、极速安全持久化
@@ -495,31 +495,10 @@
     return null;
   }
 
-  // 精准识别外部已存在的模型列表
+  // 精准识别已添加的模型:以 config.json 为唯一事实源(该供应商 models 键即真实状态)。
+  // 不再扫描页面输入框——删除模型后页面残留值会误标「已添加」。
   async function getExistingModels(baseUrl) {
     const existing = new Set();
-
-    // 1. 扫描页面输入框中的模型 ID
-    const inputs = document.querySelectorAll("input");
-    for (const inp of inputs) {
-      const val = (inp.value || "").trim();
-      if (!val) continue;
-      if (val.startsWith("http://") || val.startsWith("https://") || val.startsWith("sk-")) {
-        continue;
-      }
-
-      const isFontMono = inp.classList.contains("font-mono");
-      const isModelPlaceholder =
-        (inp.placeholder || "").includes("模型") || (inp.placeholder || "").toLowerCase().includes("model");
-      const isInsideModelList = inp.closest(".divide-y, .divide-input-border, [class*='divide-']");
-
-      if (isFontMono || isModelPlaceholder || isInsideModelList) {
-        existing.add(val);
-        existing.add(val.toLowerCase());   // 网关返回与本地配置大小写不一致时也能命中
-      }
-    }
-
-    // 2. 结合 config.json 辅助校验
     try {
       const cfg = await readZCodeConfig();
       if (cfg?.provider) {
@@ -530,16 +509,16 @@
           if (pBase === cleanBase && pdata.models) {
             Object.keys(pdata.models).forEach((m) => {
               existing.add(m.trim());
-              existing.add(m.trim().toLowerCase());
+              existing.add(m.trim().toLowerCase());   // 网关返回与本地大小写不一致时也能命中
             });
           }
         }
       }
     } catch (e) {
-      console.warn("[ZCode-Model-Puller] 读取配置辅助识别出错:", e);
+      console.warn("[ZCode-Model-Puller] 读取配置识别已添加模型出错:", e);
     }
 
-    console.log("[ZCode-Model-Puller] 外部已展示模型列表:", Array.from(existing));
+    console.log("[ZCode-Model-Puller] config 已添加模型:", Array.from(existing));
     return existing;
   }
 

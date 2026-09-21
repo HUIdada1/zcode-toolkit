@@ -30,8 +30,10 @@
   if (window.__zslider) return;
   window.__zslider = true;
   const MARK = "data-zslider";
-  const FILL = "#4ade80";           // 与 TPS 胶囊绿点同色系
-  const TRACK = "rgba(127,127,127,0.30)";
+  const FILL = "#4ade80";           // 兜底色(实际按档位着色,见 effortColor)
+  const TRACK = (typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: light)").matches)
+    ? "rgba(30,64,175,0.22)"        // 浅色主题:蓝灰轨道
+    : "rgba(6,8,16,0.55)";          // 深色主题:近黑轨道(dsh 规格)
   const DOT_IDLE = "rgba(127,127,127,0.55)";
   const ACCENT = "var(--color-warning, #e0983a)";
 
@@ -47,6 +49,7 @@
 @keyframes zsliderOut{from{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}to{opacity:0;transform:translateY(5px) scale(.96);filter:blur(4px)}}
 @keyframes zsliderDot{from{transform:translate(-50%,-50%) scale(0)}to{transform:translate(-50%,-50%) scale(1)}}
 @keyframes zsliderPulse{0%{transform:scale(1)}40%{transform:scale(1.28)}100%{transform:scale(1)}}
+@keyframes zsliderGlow{0%,100%{box-shadow:0 0 6px 1px rgba(125,211,252,.4)}50%{box-shadow:0 0 14px 3px rgba(125,211,252,.75)}}
 @keyframes zsliderRipple{from{opacity:.75;transform:translate(-50%,-50%) scale(.4)}to{opacity:0;transform:translate(-50%,-50%) scale(2.4)}}
 `;
     document.head.appendChild(st);
@@ -172,6 +175,7 @@
     if (!entryMini) return;
     const pct = n > 1 ? (idx / (n - 1)) * 100 : 0;
     entryMini.firstChild.style.height = Math.max(8, pct) + "%";
+    entryMini.firstChild.style.background = state.effortColor || "#4d9dff";
   }
 
   function ensureEntry(trig, span) {
@@ -221,7 +225,7 @@
     const miniFill = document.createElement("span");
     Object.assign(miniFill.style, {
       position: "absolute", left: "0", bottom: "0", width: "100%",
-      borderRadius: "2px", background: FILL, height: "0",
+      borderRadius: "2px", background: "#4d9dff", height: "0",
       transition: "height .25s cubic-bezier(0.34,1.56,0.64,1)",
     });
     entryMini.appendChild(miniFill);
@@ -244,7 +248,7 @@
   let fillEl = null;
   let dots = [];
   let labelEl = null;
-  let state = { levels: [], cur: "", key: "", drag: false };
+  let state = { levels: [], cur: "", key: "", drag: false, effortColor: "#4d9dff" };
   let closeTimer = null;
 
   const EASE = "cubic-bezier(0.34,1.56,0.64,1)";   // 弹性过冲曲线(width 过冲部分被裁剪层裁住)
@@ -252,7 +256,10 @@
   // ---------- 八帧奔跑小人(滑块按钮) ----------
   // 参数化火柴人跑步循环:大腿按正弦摆动、后摆相膝弯大、手臂与对侧腿同相,身体随步频轻微起伏。
   // 拖动越快 rate 越高(帧/秒),松手后以固定减速度自然停下,致敬 Codex / dsh-reasoning-effort。
-  const runner = { el: null, svg: null, frame: 0, progress: 0, rate: 0, raf: 0, last: 0 };
+  const runner = { el: null, svg: null, tail: null, frame: 0, progress: 0, raf: 0, last: 0 };
+  const IDLE_FRAME_MS = 90;     // 静止循环 720ms / 8 帧(dsh 规格)
+  const DRAG_FRAME_MS = 52.5;   // 拖拽循环 420ms / 8 帧
+  const REDUCED = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   function pt(o, deg, len) {   // deg: 90=竖直向下, 正角向前(右)
     const r = deg * Math.PI / 180;
@@ -291,26 +298,20 @@
     runner.svg.innerHTML = runnerSVG(runner.frame);
   }
 
-  function runnerTick(ts) {
+  function runnerLoop(ts) {
     if (!runner.raf) return;
-    const dt = runner.last ? Math.min(64, ts - runner.last) : 16;
+    const dt = runner.last ? Math.min(100, ts - runner.last) : 16;
     runner.last = ts;
-    if (runner.rate > 0.05 && runner.svg) {
-      runner.progress += dt / 1000 * runner.rate;
-      const f = Math.floor(runner.progress) % 8;
-      if (f !== runner.frame) { runner.frame = f; runnerRender(); }
-      runner.rate = Math.max(0, runner.rate - dt / 1000 * 10);  // 减速度 10 帧/秒²,松手跑几步自然停
-    } else {
-      runner.raf = 0; runner.last = 0;
-      return;
-    }
-    runner.raf = requestAnimationFrame(runnerTick);
+    const step = state.drag ? DRAG_FRAME_MS : IDLE_FRAME_MS;   // 拖拽 420ms 循环,静止 720ms 循环
+    runner.progress += dt / step;
+    const f = Math.floor(runner.progress) % 8;
+    if (f !== runner.frame) { runner.frame = f; runnerRender(); }
+    runner.raf = requestAnimationFrame(runnerLoop);
   }
 
-  function runnerKick(speed) {
-    if (!runner.el || !runner.svg) return;   // 面板未打开时不启动动画引擎
-    runner.rate = Math.max(runner.rate, speed || 14);
-    if (!runner.raf) { runner.last = 0; runner.raf = requestAnimationFrame(runnerTick); }
+  function runnerSetMode() {
+    if (REDUCED || !runner.el || !runner.svg) return;   // 减少动态效果:冻结在站立帧(dsh 规格)
+    if (!runner.raf) { runner.last = 0; runner.raf = requestAnimationFrame(runnerLoop); }
   }
 
   function runnerStop() {
@@ -325,19 +326,32 @@
     Object.assign(r.style, {
       position: "absolute", left: runner.el.style.left, top: "50%",
       width: "36px", height: "36px", borderRadius: "50%",
-      border: "1.5px solid " + FILL, pointerEvents: "none",
+      border: "1.5px solid " + (state.effortColor || FILL), pointerEvents: "none",
       animation: "zsliderRipple .5s ease-out forwards",
     });
     runner.el.parentElement.appendChild(r);
     setTimeout(() => r.remove(), 520);
   }
 
+  // 档位着色(dsh 规格):低/中蓝 → 高紫罗兰 → max 亮蓝并泛光脉冲
+  function effortColor(idx, n) {
+    const ratio = (idx >= 0 && n > 1) ? idx / (n - 1) : 0;
+    if (ratio >= 0.999) return { color: "#7dd3fc", glow: "0 0 10px 2px rgba(125,211,252,.65)", pulse: true };
+    if (ratio >= 0.6) return { color: "#a78bfa", glow: "0 0 8px rgba(167,139,250,.5)", pulse: false };
+    return { color: "#4d9dff", glow: "0 0 6px rgba(77,157,255,.45)", pulse: false };
+  }
+
   function setFill(idx, n) {
     const pct = n > 1 ? (idx / (n - 1)) * 100 : 0;
     fillEl.style.width = pct + "%";
     if (runner.el) runner.el.style.left = pct + "%";   // 滑块独立于裁剪层,过冲时小人悬浮在端点外
+    const ec = effortColor(idx, n);
+    state.effortColor = ec.color;
+    fillEl.style.background = ec.color;
+    fillEl.style.animation = ec.pulse ? "zsliderGlow 1.6s ease-in-out infinite" : "none";
+    if (runner.el) runner.el.style.filter = `drop-shadow(${ec.glow})`;
     dots.forEach((d, i) => {
-      d.style.background = i <= idx ? FILL : DOT_IDLE;
+      d.style.background = i <= idx ? ec.color : DOT_IDLE;
       d.style.width = d.style.height = (i === idx ? 9 : 6) + "px";
     });
   }
@@ -439,12 +453,23 @@
       width: "30px", height: "30px",
       pointerEvents: "none",
       transition: `left .45s ${EASE}`,
-      filter: "drop-shadow(0 0 5px rgba(74,222,128,0.55))",
+      filter: "drop-shadow(0 0 5px rgba(77,157,255,0.5))",
     });
     runner.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     runner.svg.setAttribute("viewBox", "0 0 24 24");
     Object.assign(runner.svg.style, { width: "100%", height: "100%", display: "block" });
     runner.el.appendChild(runner.svg);
+    // 拖动尾迹:特效裁剪到滑块左侧(dsh 规格)
+    runner.tail = document.createElement("div");
+    Object.assign(runner.tail.style, {
+      position: "absolute", right: "80%", top: "50%",
+      transform: "translateY(-50%)",
+      width: "16px", height: "3px", borderRadius: "2px",
+      background: "linear-gradient(to left, rgba(255,255,255,.85), rgba(255,255,255,0))",
+      opacity: "0", transition: "opacity .18s",
+      pointerEvents: "none",
+    });
+    runner.el.appendChild(runner.tail);
     runnerRender();
     track.appendChild(runner.el);
     p.appendChild(track);
@@ -498,23 +523,21 @@
       state.drag = true;
       lastMoveX = e.clientX;
       fillEl.style.transition = "none";   // 拖拽跟手,不用弹性
-      runnerKick(12);
+      if (runner.tail) runner.tail.style.opacity = ".55";
       try { track.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       preview(idxFromEvent(e));
     });
     track.addEventListener("pointermove", (e) => {
       if (!state.drag) return;
       preview(idxFromEvent(e));
-      // 拖得越快小人跑得越快(速度联动;衰减由引擎负责,持续移动会不断补kick)
-      const dx = lastMoveX == null ? 0 : Math.abs(e.clientX - lastMoveX);
       lastMoveX = e.clientX;
-      if (dx > 0) runnerKick(8 + Math.min(34, dx * 2.2));
     });
     const finish = (e) => {
       if (!state.drag) return;
       state.drag = false;
       lastMoveX = null;
-      fillEl.style.transition = `width .45s ${EASE}`;   // 松手回弹;小人自然减速停下
+      if (runner.tail) runner.tail.style.opacity = "0";
+      fillEl.style.transition = `width .45s ${EASE}`;   // 松手回弹,小人回到 720ms 待机循环
       try { track.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       const idx = idxFromEvent(e);
       const value = state.levels[idx];
@@ -529,6 +552,7 @@
     track.addEventListener("pointercancel", (e) => {
       state.drag = false;
       lastMoveX = null;
+      if (runner.tail) runner.tail.style.opacity = "0";
       fillEl.style.transition = `width .45s ${EASE}`;
       sync();
     });
@@ -542,7 +566,6 @@
       else if (e.key === "ArrowLeft") idx = Math.max(0, idx - 1);
       else return;
       e.preventDefault();
-      runnerKick(13);
       const value = state.levels[idx];
       setFill(idx, n);
       labelEl.textContent = value;
@@ -551,6 +574,7 @@
 
     panel = p;
     refreshPanel();
+    runnerSetMode();   // 打开面板即启动待机循环(720ms);拖拽时由 state.drag 切 420ms
     document.addEventListener("pointerdown", onDocDown, true);
     document.addEventListener("keydown", onDocKey, true);
     try { p.focus(); } catch (err) { /* ignore */ }
@@ -594,8 +618,8 @@
         entryName.textContent = p.cur;
         entryName.style.color = idx >= 0 ? "" : "rgba(233,99,99,0.9)";   // 未知档位标红提示
         setMini(idx >= 0 ? idx : 0, p.levels.length);
-        // 换档确认:小人起跑 + 滑块处发射涟漪 + 档名脉冲,呼应填充弹性回弹
-        if (state.cur) runnerKick(14);
+        // 换档确认:确保小人循环在跑 + 滑块处发射涟漪 + 档名脉冲
+        if (state.cur && panel) runnerSetMode();
         if (panel) rippleAt();
         if (panel && labelEl) {
           labelEl.style.animation = "none";
