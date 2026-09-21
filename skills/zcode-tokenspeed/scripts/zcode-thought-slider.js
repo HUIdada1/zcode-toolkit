@@ -214,8 +214,8 @@
     // 迷你电量条(原生触发器同款造型:2px 宽竖条,底部向上填充)
     entryMini = document.createElement("span");
     Object.assign(entryMini.style, {
-      position: "relative", width: "3px", height: "12px",
-      borderRadius: "2px", overflow: "hidden",
+      position: "relative", width: "5px", height: "14px",
+      borderRadius: "3px", overflow: "hidden",
       background: "rgba(127,127,127,0.25)",
     });
     const miniFill = document.createElement("span");
@@ -260,7 +260,7 @@
   }
   const f1 = (n) => Number(n).toFixed(1);
   function seg(a, b, extra) {
-    return `<line x1="${f1(a[0])}" y1="${f1(a[1])}" x2="${f1(b[0])}" y2="${f1(b[1])}" stroke="#fff" stroke-opacity="${(extra && extra.op) || 0.95}" stroke-width="${(extra && extra.w) || 1.8}" stroke-linecap="round"/>`;
+    return `<line x1="${f1(a[0])}" y1="${f1(a[1])}" x2="${f1(b[0])}" y2="${f1(b[1])}" stroke="#fff" stroke-opacity="${(extra && extra.op) || 0.95}" stroke-width="${(extra && extra.w) || 2.4}" stroke-linecap="round"/>`;
   }
 
   function runnerSVG(frame) {
@@ -281,7 +281,7 @@
       const swing = 34 * Math.sin(ph);
       const elbow = pt(sh, 90 + swing - 14, 4.2);               // 上臂略张
       const hand = pt(elbow, 90 + swing + 26, 4.0);             // 前臂前摆
-      parts.push(seg(sh, elbow, { op: 0.65, w: 1.6 }), seg(elbow, hand, { op: 0.65, w: 1.6 }));
+      parts.push(seg(sh, elbow, { op: 0.7, w: 2.0 }), seg(elbow, hand, { op: 0.7, w: 2.0 }));
     }
     return `<g>${parts.join("")}</g>`;
   }
@@ -324,7 +324,7 @@
     const r = document.createElement("div");
     Object.assign(r.style, {
       position: "absolute", left: runner.el.style.left, top: "50%",
-      width: "26px", height: "26px", borderRadius: "50%",
+      width: "36px", height: "36px", borderRadius: "50%",
       border: "1.5px solid " + FILL, pointerEvents: "none",
       animation: "zsliderRipple .5s ease-out forwards",
     });
@@ -405,20 +405,20 @@
     // 滑条行
     track = document.createElement("div");
     Object.assign(track.style, {
-      position: "relative", height: "18px",
+      position: "relative", height: "26px",
       cursor: "pointer", touchAction: "none",
     });
     // 轨道底
     rail = document.createElement("div");
     Object.assign(rail.style, {
-      position: "absolute", left: "0", right: "0", top: "7px", height: "4px",
+      position: "absolute", left: "0", right: "0", top: "11px", height: "4px",
       borderRadius: "2px", background: TRACK,
     });
     track.appendChild(rail);
     // 填充条裁剪层:弹性过冲曲线会让 width 短暂超过 100%,必须裁住否则溢出轨道
     const clip = document.createElement("div");
     Object.assign(clip.style, {
-      position: "absolute", left: "0", right: "0", top: "7px", height: "4px",
+      position: "absolute", left: "0", right: "0", top: "11px", height: "4px",
       borderRadius: "2px", overflow: "hidden",
     });
     fillEl = document.createElement("div");
@@ -436,10 +436,10 @@
     Object.assign(runner.el.style, {
       position: "absolute", left: "0%", top: "50%",
       transform: "translate(-50%,-58%)",
-      width: "20px", height: "20px",
+      width: "30px", height: "30px",
       pointerEvents: "none",
       transition: `left .45s ${EASE}`,
-      filter: "drop-shadow(0 0 4px rgba(74,222,128,0.45))",
+      filter: "drop-shadow(0 0 5px rgba(74,222,128,0.55))",
     });
     runner.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     runner.svg.setAttribute("viewBox", "0 0 24 24");
