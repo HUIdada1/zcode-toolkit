@@ -32,16 +32,24 @@ ZCode 客户端补丁工具
   tok/s/首 token/out；脚本内不调用 port.start()，否则 3.12.2 会卡启动）：
   输入框工具栏常驻统计胶囊 ● 时间 · 首 token · tok/s · out（当前会话最近一轮，
   切换会话即消失），数据取自页面内 MessagePort 会话事件流，无常驻服务。
+  胶囊右键可切换位置：输入框工具栏（默认）/ 会话顶部 sticky，localStorage 记忆。
   重打包级修改：整体重排 asar 目录、对改动文件重算 integrity。
   原件备份 app.asar.tps.bak，记录在 app.asar.tps-patch.json，可整体还原。
 
-四、模型拉取按钮（app.asar，--model-puller）
+四、思考强度吸附滑条（app.asar，--thought-slider）
+  向工具栏原生「思考级别」下拉旁注入 zcode-thought-slider.js：横向吸附拖拽条，
+  档位动态取自原生状态探针（data-thought-levels，模型配几档吸几档），拖完经
+  React fiber 直调原生 onValueChange（降级：模拟点开原生菜单按序点选），等价
+  于用户点选菜单项 → 内核 session/setThoughtLevel，会话内即时生效。
+  注入/备份/还原与 TPS 同链路：app.asar.slider.bak + app.asar.slider-patch.json。
+
+五、模型拉取按钮（app.asar，--model-puller）
   设置页注入「⚡️ 自动拉取模型」按钮：拉取供应商 /models 接口 → 弹窗勾选 → 写入
   config.json（整读整写、已有条目原样保留，含手改的 reasoning.variants）。
   四处改动：out/renderer/ 新增 zcode-model-puller.js + index.html 挂载 +
   preload 暴露 3 个 IPC 方法（readConfigFile/writeConfigFile/fetchModelsFromUrl）+
   main 注册 3 个 IPC handler（读写 ~/.zcode/v2/config.json、代理拉模型列表）。
-  前端脚本为 vendored 的第三方实现 (MIT，版权声明见脚本文件头)；
+  前端脚本 vendored from HHQ-666/zcode-model-puller (MIT)；
   preload/main 锚点用语义字符串定位（exposeInMainWorld("zcode",{ / SaveMcpToUserDirectory），
   压缩符号经正则捕获，跨版本无需维护符号表。
   原件备份 app.asar.puller.bak，记录在 app.asar.puller-patch.json，可整体还原。
@@ -54,6 +62,7 @@ ZCode 客户端补丁工具
   python zcode_patcher.py --extract             # 提取当前内核锚点（新版本无已知锚点时）
   python zcode_patcher.py --usage-chart         # 用量页去截断（同样支持 --check/--revert）
   python zcode_patcher.py --tps-footer          # TPS 统计栏注入（同样支持 --check/--revert）
+  python zcode_patcher.py --thought-slider      # 思考强度吸附滑条（同样支持 --check/--revert）
   python zcode_patcher.py --model-puller        # 模型拉取按钮注入（同样支持 --check/--revert）
   python zcode_patcher.py "D:\\ZCode"           # 只处理指定安装（安装根目录或 zcode.cjs 均可）
 
@@ -677,8 +686,17 @@ TPS_INDEX_PATH = "out/renderer/index.html"
 TPS_SCRIPT_PATH = "out/renderer/zcode-tps.js"
 TPS_TAG = f'<script src="./{TPS_SCRIPT_PATH.split("/")[-1]}"></script>'
 
+# ---------------------------------------- 思考强度吸附滑条(asar 重打包级,--thought-slider)
+# 与 TPS 同款注入链路:out/renderer 新增脚本 + index.html 挂载。
+# 滑条挂在原生「思考级别」下拉旁,档位吸附自原生状态探针(data-thought-levels),
+# 提交走 React fiber 直调 onValueChange(降级:模拟点开原生菜单按序点选),
+# 等价于用户点选菜单项 → 内核 session/setThoughtLevel,会话内即时生效。
+
+SLIDER_SCRIPT_PATH = "out/renderer/zcode-thought-slider.js"
+SLIDER_TAG = f'<script src="./{SLIDER_SCRIPT_PATH.split("/")[-1]}"></script>'
+
 # ---------------------------------------- 模型拉取按钮注入（asar 重打包级，--model-puller）
-# 前端脚本为 vendored 的第三方实现 (MIT，版权声明见脚本文件头)；preload 桥与 main IPC handler
+# 前端脚本 vendored from HHQ-666/zcode-model-puller (MIT)；preload 桥与 main IPC handler
 # 在此内置。锚点用语义字符串 + 正则捕获压缩符号（electron 别名 / ipcMain 包装别名），
 # 不随版本符号重排失效——等价于内核锚点的结构化提取，天然跨版本。
 
@@ -940,7 +958,11 @@ def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> i
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
-    os.replace(tmp, asar)
+    try:
+        os.replace(tmp, asar)
+    except OSError:
+        tmp.unlink(missing_ok=True)   # asar 被占用（ZCode 运行中）时不留 tmp 残留
+        raise
     return asar.stat().st_size
 
 
@@ -974,14 +996,18 @@ def _relocate_sidecar(asar: Path, suffix: str) -> None:
         print(f"[*] 已同步 {side.name} 的 offset/指纹到重打包后的 asar")
 
 
-def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path | None) -> None:
-    """注入 zcode-tps.js：读 ServicePort 事件流得精确 tok/s / 首 token / out。
-    ⚠️ 脚本内**绝不调用 port.start()**（只 addEventListener，start 交给应用）——
-    否则会消费掉服务端 Initialize 启动握手，ZCode 3.12.2 会卡在启动界面。
+def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path: Path | None,
+                           *, label: str, script_entry: str, tag: str,
+                           side_suffix: str, bak_suffix: str) -> None:
+    """renderer 单脚本注入通用链路(TPS 统计栏 / 思考强度滑条共用):
+    index.html </body> 前挂 <script> + 新增脚本条目,整体重排 asar、重算 integrity。
+    ⚠️ zcode-tps.js 内**绝不调用 port.start()**(只 addEventListener,start 交给应用)——
+    否则会消费掉服务端 Initialize 启动握手,ZCode 3.12.2 会卡在启动界面。
     详见 scripts/zcode-tps.js 头部说明与 SKILL.md。"""
-    side = asar.with_name(asar.name + ".tps-patch.json")
-    bak = asar.with_name(asar.name + ".tps.bak")
+    side = asar.with_name(asar.name + side_suffix)
+    bak = asar.with_name(asar.name + bak_suffix)
     asar_size = asar.stat().st_size
+    tag_b = tag.encode()
 
     raw, header, data_start = _asar_header_raw(asar)
     paths = {p: ent for p, ent in _asar_walk_entries(header)}
@@ -990,8 +1016,8 @@ def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path
         print(f"[!] {asar}\n    未找到 {TPS_INDEX_PATH}，版本结构可能已变，跳过")
         return
     idx_bytes = _asar_entry_bytes(raw, data_start, idx_ent)
-    tagged = TPS_TAG.encode() in idx_bytes
-    installed = tagged and TPS_SCRIPT_PATH in paths
+    tagged = tag_b in idx_bytes
+    installed = tagged and script_entry in paths
 
     saved = None
     if side.is_file():
@@ -1004,41 +1030,41 @@ def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path
 
     if check_only:
         state = "已打" if installed else ("不完整（index.html 有 tag 但缺脚本条目）" if tagged else "未打")
-        print(f"[*] {asar}\n    TPS 统计栏注入: {state} | sidecar: {'有' if saved else '无'} | 备份: {'有' if bak.is_file() else '无'}")
+        print(f"[*] {asar}\n    {label}注入: {state} | sidecar: {'有' if saved else '无'} | 备份: {'有' if bak.is_file() else '无'}")
         return
 
     if revert:
         if not installed and not saved:
-            print(f"[.] {asar}\n    未打 TPS 注入，跳过")
+            print(f"[.] {asar}\n    未打{label}注入，跳过")
             return
         # 外科手术式还原：只从当前 index.html 摘除本补丁的 tag，不动其他补丁
         # （如 --model-puller）对同一文件的改动；sidecar 原件仅作兜底。
-        stripped = idx_bytes.replace(TPS_TAG.encode() + b"\n", b"").replace(TPS_TAG.encode(), b"")
+        stripped = idx_bytes.replace(tag_b + b"\n", b"").replace(tag_b, b"")
         if stripped == idx_bytes and saved and saved.get("index_original_b64"):
             stripped = base64.b64decode(saved["index_original_b64"])
-        new_size = _repack_asar(asar, {TPS_INDEX_PATH: stripped}, {TPS_SCRIPT_PATH})
+        new_size = _repack_asar(asar, {TPS_INDEX_PATH: stripped}, {script_entry})
         side.unlink(missing_ok=True)
         bak.unlink(missing_ok=True)
         _refresh_chart_sidecar(asar)
-        print(f"[+] {asar}\n    已移除 TPS 注入（新大小 {new_size:,} 字节，备份已清理）")
+        print(f"[+] {asar}\n    已移除{label}注入（新大小 {new_size:,} 字节，备份已清理）")
         return
 
-    if tps_src is None:
-        tps_src = Path(__file__).resolve().parent / "zcode-tps.js"
-    if not tps_src.is_file():
-        raise SystemExit(f"[!] 找不到注入源脚本 {tps_src}（可用 --tps-src 指定路径）")
-    script_bytes = tps_src.read_bytes()
+    if src_path is None:
+        src_path = Path(__file__).resolve().parent / script_entry.split("/")[-1]
+    if not src_path.is_file():
+        raise SystemExit(f"[!] 找不到注入源脚本 {src_path}（路径由调用方指定）")
+    script_bytes = src_path.read_bytes()
 
     # 脚本热更新：已注入但内容与源不一致时替换脚本条目（无需先 revert）。
     # 只按"脚本条目是否存在"判断会让改动后的脚本永不生效（版本适配修复无法落地）。
     if installed:
-        cur_script = _asar_entry_bytes(raw, data_start, paths[TPS_SCRIPT_PATH]) if TPS_SCRIPT_PATH in paths else None
+        cur_script = _asar_entry_bytes(raw, data_start, paths[script_entry]) if script_entry in paths else None
         if cur_script == script_bytes:
-            print(f"[=] {asar}\n    已打 TPS 注入（脚本同源），跳过")
+            print(f"[=] {asar}\n    已打{label}注入（脚本同源），跳过")
             return
-        new_size = _repack_asar(asar, {TPS_SCRIPT_PATH: script_bytes}, set())
+        new_size = _repack_asar(asar, {script_entry: script_bytes}, set())
         _refresh_chart_sidecar(asar)
-        print(f"[+] {asar}\n    TPS 脚本已热更新（{tps_src.name} {len(script_bytes):,} 字节，其余组件不变）")
+        print(f"[+] {asar}\n    {label}脚本已热更新（{src_path.name} {len(script_bytes):,} 字节，其余组件不变）")
         return
 
     if idx_bytes.count(b"</body>") != 1:
@@ -1048,17 +1074,29 @@ def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path
     if not bak.is_file():
         shutil.copyfile(asar, bak)
 
-    new_idx = idx_bytes.replace(b"</body>", TPS_TAG.encode() + b"</body>", 1)
-    new_size = _repack_asar(asar, {TPS_INDEX_PATH: new_idx, TPS_SCRIPT_PATH: script_bytes}, set())
+    new_idx = idx_bytes.replace(b"</body>", tag_b + b"</body>", 1)
+    new_size = _repack_asar(asar, {TPS_INDEX_PATH: new_idx, script_entry: script_bytes}, set())
     side.write_text(json.dumps({
         "asar_size": new_size,
         "index_path": TPS_INDEX_PATH,
-        "script_entry": TPS_SCRIPT_PATH,
+        "script_entry": script_entry,
         "index_original_b64": base64.b64encode(idx_bytes).decode(),
     }, ensure_ascii=False), encoding="utf-8")
     _refresh_chart_sidecar(asar)
-    print(f"[+] {asar}\n    TPS 统计栏注入完成（{tps_src.name} {len(script_bytes):,} 字节 -> {TPS_SCRIPT_PATH}，index.html 已挂载）\n"
+    print(f"[+] {asar}\n    {label}注入完成（{src_path.name} {len(script_bytes):,} 字节 -> {script_entry}，index.html 已挂载）\n"
           f"    原件备份: {bak.name} | 记录: {side.name}")
+
+
+def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path | None) -> None:
+    _process_script_inject(asar, check_only, revert, tps_src,
+                           label="TPS 统计栏", script_entry=TPS_SCRIPT_PATH, tag=TPS_TAG,
+                           side_suffix=".tps-patch.json", bak_suffix=".tps.bak")
+
+
+def process_thought_slider(asar: Path, check_only: bool, revert: bool, slider_src: Path | None) -> None:
+    _process_script_inject(asar, check_only, revert, slider_src,
+                           label="思考强度滑条", script_entry=SLIDER_SCRIPT_PATH, tag=SLIDER_TAG,
+                           side_suffix=".slider-patch.json", bak_suffix=".slider.bak")
 
 
 def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src: Path | None) -> None:
@@ -1234,13 +1272,17 @@ def main() -> None:
                     help="注入 TPS 统计栏：输入框工具栏常驻胶囊（● 时间 · 首 token · tok/s · out），asar 重打包级")
     ap.add_argument("--tps-src", default=None,
                     help="指定注入脚本路径（默认本目录 zcode-tps.js）")
+    ap.add_argument("--thought-slider", action="store_true",
+                    help="注入思考强度吸附滑条：原生「思考级别」下拉旁的拖拽刻度条，档位即时生效，asar 重打包级")
+    ap.add_argument("--slider-src", default=None,
+                    help="指定注入脚本路径（默认本目录 zcode-thought-slider.js）")
     ap.add_argument("--model-puller", action="store_true",
                     help="注入模型拉取按钮：设置页「自动拉取模型」，经 preload/main IPC 读写 config，asar 重打包级")
     ap.add_argument("--puller-src", default=None,
                     help="指定注入的 zcode-model-puller.js 路径（默认用本脚本同目录自带的）")
     args = ap.parse_args()
 
-    if args.usage_chart or args.tps_footer or args.model_puller or args.model_width:
+    if args.usage_chart or args.tps_footer or args.model_puller or args.model_width or args.thought_slider:
         asars = _resolve_asars(args.target)
         if args.usage_chart:
             mode = "检查" if args.check else ("还原" if args.revert else "打补丁")
@@ -1259,6 +1301,15 @@ def main() -> None:
             for a in asars:
                 try:
                     process_tps_footer(a, args.check, args.revert, src)
+                except PermissionError:
+                    print(f"[!] {a}\n    文件被占用（ZCode 正在运行）或无写入权限；完全退出 ZCode 后重试")
+        if args.thought_slider:
+            mode = "检查" if args.check else ("还原" if args.revert else "打补丁")
+            print(f"=== 思考强度滑条注入，目标 {len(asars)} 处，模式：{mode} ===")
+            src = Path(args.slider_src) if args.slider_src else None
+            for a in asars:
+                try:
+                    process_thought_slider(a, args.check, args.revert, src)
                 except PermissionError:
                     print(f"[!] {a}\n    文件被占用（ZCode 正在运行）或无写入权限；完全退出 ZCode 后重试")
         if args.model_puller:

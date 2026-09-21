@@ -23,10 +23,12 @@
  * 已知特性：tok/s 在开始生成后约 1~4 秒才出现（需要滑动窗口内 ≥2 个采样点，且首块到达
  *   前的思考阶段无文本增量可算），期间只显示 ● 与时间，属预期。
  *
- * 原始版本来自社区分享（原作者授权可直接借鉴定制），
+ * 原始版本来自 linux.do 帖子 2886711（作者 lanvv）分享的 zcode-patcher.zip，
  * 本实现仅删除 port.start() 一行并补充诊断，计算逻辑与原版一致。
  *
  * 安全：只读事件流、只写自己的 host 元素；异常静默；找不到工具栏行时自清理。
+ * 位置切换：胶囊右键菜单可在「输入框工具栏(默认) / 会话顶部(sticky)」间切换，
+ *   localStorage 记忆（键 ztps-pos）；数据层零改动，仅挂载点不同。
  * 回滚：脚本/补丁异常时用 scripts/restore_clean.py --latest 秒级还原，无需重装。
  */
 (() => {
@@ -34,6 +36,93 @@
   window.__ztps = true;
   const dec = new TextDecoder();
   const MARK = "data-ztps";
+
+  // ---------- 位置切换(胶囊右键菜单,localStorage 记忆) ----------
+  const POS_KEY = "ztps-pos";
+  const POSITIONS = [
+    { id: "composer-below", label: "输入框下方" },
+    { id: "toolbar", label: "输入框工具栏" },
+    { id: "session-top", label: "会话顶部" },
+  ];
+  const getPos = () => {
+    try {
+      const v = localStorage.getItem(POS_KEY);
+      return POSITIONS.some((p) => p.id === v) ? v : "composer-below";
+    } catch (err) { return "composer-below"; }
+  };
+  const setPos = (id) => { try { localStorage.setItem(POS_KEY, id); } catch (err) { /* 静默 */ } };
+
+  // 会话顶部 sticky 的挂载点:当前会话消息区的滚动容器。
+  // 从轮次 section 向上找第一个纵向可滚动的祖先(主内容区特征:overflow auto/scroll 且足够高)。
+  function findSessionScroller() {
+    const sec = document.querySelector("section[data-turn-id]");
+    let cur = sec ? sec.parentElement : null;
+    while (cur && cur !== document.body) {
+      let oy = "";
+      try { oy = getComputedStyle(cur).overflowY; } catch (err) { /* ignore */ }
+      if (/(auto|scroll)/.test(oy) && cur.clientHeight > 120) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  let posMenu = null;
+  function closePosMenu() {
+    if (posMenu) {
+      posMenu.remove();
+      posMenu = null;
+      document.removeEventListener("pointerdown", onDocDownClose, true);
+    }
+  }
+  // 点击菜单项的时序:pointerdown(此监听)→ pointerup → click。若 pointerdown 就关菜单,
+  // click 会在已移除的元素上落空、永远选不中——故菜单内部点击不关,交给 click 处理
+  function onDocDownClose(e) {
+    if (posMenu && posMenu.contains(e.target)) return;
+    closePosMenu();
+  }
+  function openPosMenu(x, y) {
+    closePosMenu();
+    const m = document.createElement("div");
+    m.setAttribute("data-ztps-menu", "1");
+    Object.assign(m.style, {
+      position: "fixed", left: x + "px", top: y + "px", zIndex: "2147483000",
+      background: "var(--color-background, #1e1e1e)", color: "var(--color-foreground, #e8e8e8)",
+      border: "1px solid rgba(127,127,127,0.3)", borderRadius: "10px",
+      padding: "4px", display: "flex", flexDirection: "column", gap: "2px",
+      fontSize: "12px", lineHeight: "1.4", boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+      userSelect: "none",
+    });
+    const cur = getPos();
+    for (const p of POSITIONS) {
+      const it = document.createElement("div");
+      Object.assign(it.style, { padding: "5px 12px", borderRadius: "6px", cursor: "pointer", whiteSpace: "nowrap" });
+      it.textContent = (p.id === cur ? "● " : "○ ") + p.label;
+      it.addEventListener("pointerenter", () => { it.style.background = "rgba(127,127,127,0.18)"; });
+      it.addEventListener("pointerleave", () => { it.style.background = "transparent"; });
+      it.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closePosMenu();
+        if (p.id !== cur) { setPos(p.id); renderBar(); }
+      });
+      m.appendChild(it);
+    }
+    document.body.appendChild(m);
+    // 视口内收敛,防止贴边溢出
+    const r = m.getBoundingClientRect();
+    if (r.right > window.innerWidth) m.style.left = Math.max(4, window.innerWidth - r.width - 4) + "px";
+    if (r.bottom > window.innerHeight) m.style.top = Math.max(4, window.innerHeight - r.height - 4) + "px";
+    posMenu = m;
+    // 捕获阶段监听外部按下即关闭;setTimeout 避免右键自身的 pointerdown 立刻触发关闭
+    setTimeout(() => document.addEventListener("pointerdown", onDocDownClose, true), 0);
+  }
+  // 右键入口挂 document 捕获阶段:任何中间层 stopPropagation 都拦不住,且不随 pill 生命周期失效
+  document.addEventListener("contextmenu", (e) => {
+    const t = e.target;
+    if (t && typeof t.closest === "function" && t.closest("[data-ztps-bar]")) {
+      e.preventDefault();
+      openPosMenu(e.clientX, e.clientY);
+    }
+  }, true);
 
   const turns = new Map();          // turnId(msg_xxx) -> 轮统计
   const firstChunkByScid = {};
@@ -261,13 +350,24 @@
     return { el: null, tried };
   }
 
-  function findToolbarRow() {
+  // composer 卡片(v4-composer):工具栏行与「输入框下方」条共用的定位基准
+  function findComposerCard() {
     const { el: ta, tried } = findComposerInput();
     if (diag) {
       diag.inputTried = tried;
       diag.inputFound = !!ta;
     }
     if (!ta) return null;
+    let card = null;
+    try { card = ta.closest("[data-testid='v4-composer']"); } catch (err) { /* ignore */ }
+    if (!card) card = ta.closest("form") ? ta.closest("form").parentElement : null;
+    if (!card) card = ta.parentElement;
+    return card || null;
+  }
+
+  function findToolbarRow() {
+    const card = findComposerCard();
+    if (!card) return null;
 
     // 从某元素向上找「工具栏行」：class 同时含 flex 与 items-end 的 div，且不得越过 card
     const rowFrom = (el, card) => {
@@ -284,15 +384,8 @@
 
     // ① 首选：发送按钮向上找工具栏行。
     //    发送按钮（v4-composer-send）恒在工具栏内，且不会与输入框的 testid 混淆——
-    //    注意不能用 ta.closest("[data-testid*='composer']")：输入框自身 testid 为
-    //    v4-composer-input 也含 "composer"，closest 从自身起匹配会返回输入框本身，
-    //    导致在输入框内部找工具栏行而落空（3.12.2 实测踩到）。
-    let card = null;
-    try { card = ta.closest("[data-testid='v4-composer']"); } catch (err) { /* ignore */ }
-    if (!card) card = ta.closest("form") ? ta.closest("form").parentElement : null;
-    if (!card) card = ta.parentElement;
-    if (!card) return null;
-
+    //    注意不能用输入框的 closest("[data-testid*='composer']")：输入框自身 testid
+    //    也含 "composer"，closest 从自身起匹配会返回输入框本身（3.12.2 实测踩到）。
     let picked = null;
     try {
       const sendBtn = document.querySelector("[data-testid='v4-composer-send']");
@@ -326,20 +419,79 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.12-fix";
+    diag.scriptVersion = "3.14-pos";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
+  // ---------- 挂载点 ----------
+  // 三种模式共用同一个 host(含内层 pill);切换模式时搬移节点并重置样式。
+  //   composer-below: composer 卡片之后的独立一行(默认),与输入框同宽,承载会话累计统计
+  //   toolbar:        工具栏行内水平居中
+  //   session-top:    消息区滚动容器首子元素,sticky 吸顶;负 margin-bottom 抵消文档流占位,
+  //                   host 上 pointer-events:none 放行下方消息,胶囊本体恢复 auto
+  function attach(host, mode) {
+    const changed = host.getAttribute("data-ztps-mode") !== mode;
+    if (mode === "composer-below") {
+      const card = findComposerCard();
+      if (!card || !card.parentElement) return false;
+      if (changed || host.parentElement !== card.parentElement || host.previousElementSibling !== card) {
+        card.insertAdjacentElement("afterend", host);
+        host.setAttribute("data-ztps-mode", mode);
+        host.style.cssText = "";
+        Object.assign(host.style, {
+          display: "flex", justifyContent: "center",
+          alignItems: "center",
+          marginTop: "6px", padding: "0",
+          alignSelf: "stretch",          // 与 composer 卡片同宽
+          pointerEvents: "auto",
+        });
+      }
+    } else if (mode === "session-top") {
+      const sc = findSessionScroller();
+      if (!sc) return false;
+      if (changed || host.parentElement !== sc) {
+        sc.insertBefore(host, sc.firstChild);
+        host.setAttribute("data-ztps-mode", mode);
+        host.style.cssText = "";
+        Object.assign(host.style, {
+          position: "sticky", top: "8px", zIndex: "30",
+          width: "100%", height: "22px",
+          display: "flex", justifyContent: "center",
+          margin: "0 0 -30px", padding: "0",
+          pointerEvents: "none",
+        });
+      }
+    } else {
+      const row = findToolbarRow();
+      if (!row) return false;
+      if (changed || host.parentElement !== row) {
+        row.insertBefore(host, row.children[1] || null);
+        host.setAttribute("data-ztps-mode", mode);
+        host.style.cssText = "";
+        Object.assign(host.style, {
+          display: "inline-flex", flex: "0 1 auto",
+          minWidth: "0", maxWidth: "50%",
+          marginLeft: "auto", marginRight: "auto",   // 两侧 auto = 工具栏行内水平居中
+          alignSelf: "center", height: "22px",
+          margin: "0", padding: "0", position: "static",
+          pointerEvents: "auto",
+        });
+        row.style.alignItems = "center";
+      }
+    }
+    const pill = host.firstChild;
+    if (pill) {
+      pill.style.pointerEvents = "auto";
+      pill.title = "ZCode TPS · 右键切换位置";
+    }
+    return true;
+  }
+
   function renderBar() {
     try {
-      const row = findToolbarRow();
-      if (!row) {
-        // 找不到工具栏行（新建任务空态/设置页等）时清掉已注入的 host，杜绝旧内容残留
-        document.querySelectorAll("[data-ztps-bar]").forEach((el) => el.remove());
-        return;
-      }
+      const mode = getPos();
       // 只认当前会话 DOM 里可见的轮次——切走后旧统计不再展示。
-      // 当前会话 id 从 DOM 的 data-session-id 读取（激活 tab 即变，多会话并行互不干扰，reload 后立即可用）
+      // 当前会话 id 从 DOM 的 data-session-id 读取(激活 tab 即变,多会话并行互不干扰,reload 后立即可用)
       let domSess = null;
       document.querySelectorAll("[data-session-id]").forEach((el) => {
         if (!domSess && el.offsetParent != null) domSess = el.getAttribute("data-session-id");
@@ -350,19 +502,27 @@
       }
       const visible = new Set();
       document.querySelectorAll("section[data-turn-id]").forEach((el) => visible.add(el.getAttribute("data-turn-id")));
+      // 会话累计:轮数 / 累计输入 / 累计缓存命中 / 累计输出(仅当前可见会话的轮次)
+      const agg = { rounds: 0, input: 0, cache: 0, output: 0 };
       let latest = null;
       for (const t of turns.values()) {
         if (!visible.has(t.msgId)) continue;
-        // 轮次归属会话与当前显示会话不符时排除（会话切换的 DOM 中间态残留兜底）
+        // 轮次归属会话与当前显示会话不符时排除(会话切换的 DOM 中间态残留兜底)
         if (t.sessionId && domSess && t.sessionId !== domSess) continue;
+        if (t.startedAt != null || hasActivity(t)) agg.rounds++;
+        agg.input += t.inputTokens || 0;
+        agg.cache += t.cacheReadTokens || 0;
+        // 流式中 usage 未到的轮以内容估算兜底,精确值到达后自然覆盖
+        agg.output += Math.max(t.outputTokens || 0, t.streaming ? (t.textTok || 0) : 0);
         if (!latest || (t.startedAt ?? 0) > (latest.startedAt ?? 0)) latest = t;
       }
-      let host = row.querySelector(":scope > [data-ztps-bar]");
+      let host = document.querySelector("[" + MARK + "-bar]");
       if (diag) {
         diag.domSessionId = domSess;
         diag.visibleTurns = visible.size;
         diag.turnStats = turns.size;
         diag.latestFound = !!latest;
+        diag.posMode = mode;
         if (latest) {
           diag.latest = {
             msgId: latest.msgId, sessionId: latest.sessionId,
@@ -372,45 +532,62 @@
         }
         diag.hostAttached = !!host;
       }
-      // 无可见轮次 → 不展示；轮次无时间戳但仍在生成/有内容 → 显示（省略时间段）；完全无数据防假时钟。
-      // 仅在 host 已存在时移除，绝不走「先创建再删除」，否则 MutationObserver 会自激
-      if (!latest || (!hasActivity(latest) && latest.endedAt == null && latest.startedAt == null)) {
-        if (diag) diag.hiddenReason = !latest ? "无可见轮次" : "轮次无时间戳且无活动";
-        if (host) host.remove();
-        return;
-      }
-      if (diag) diag.hiddenReason = null;
+      // 数据态:轮次有时间戳或生成活动;空态:当前会话无任何轮次(新会话/未对话)。
+      // 状态栏常驻:空态显示仅绿点的胶囊(空闲静态),不拿当前时间冒充轮次时间
+      const hasData = !!latest && (hasActivity(latest) || latest.endedAt != null || latest.startedAt != null);
+      if (diag) diag.hiddenReason = hasData ? null : "空态(无轮次数据)";
       if (!host) {
         host = document.createElement("div");
         host.setAttribute("data-ztps-bar", "1");
-        Object.assign(host.style, {
+        host.setAttribute("data-ztps-mode", mode);
+        const pill = document.createElement("div");
+        Object.assign(pill.style, {
           display: "inline-flex", alignItems: "center", gap: "6px",
-          flex: "0 1 auto",
           minWidth: "0",
-          maxWidth: "50%",
-          marginLeft: "auto", marginRight: "auto",   // 两侧 auto = 工具栏行内水平居中
-          alignSelf: "center",
-          fontSize: "11px", height: "22px", userSelect: "none",
+          fontSize: "11px", height: "20px", userSelect: "none",
           fontVariantNumeric: "tabular-nums",
           whiteSpace: "nowrap", overflow: "hidden",
           borderRadius: "999px",
-          background: "rgba(127,127,127,0.12)",
+          background: "rgba(127,127,127,0.08)",
           padding: "0 10px",
         });
-        row.insertBefore(host, row.children[1] || null);
+        pill.addEventListener("contextmenu", (e) => e.preventDefault());
+        host.appendChild(pill);
       }
-      host.style.alignSelf = "center";
-      row.style.alignItems = "center";
+      // 挂载点失效(找不到工具栏行/会话滚动容器,新建任务空态、设置页等)→ 移除,杜绝旧内容残留
+      if (!attach(host, mode)) {
+        if (diag) diag.hiddenReason = "挂载点未找到(" + mode + ")";
+        closePosMenu();
+        host.remove();
+        return;
+      }
+      const pill = host.firstChild;
+      if (!hasData) {
+        // 空态:只显示空闲绿点;右键切位置等交互照常
+        if (pill._zkey !== "empty") {
+          pill._zkey = "empty";
+          pill._zsegs = [];
+          pill.style.background = "rgba(127,127,127,0.08)";
+          pill.style.padding = "0 10px";
+          pill.innerHTML = "";
+          const dot = document.createElement("span");
+          dot.textContent = "●";
+          dot.style.color = "#4ade80";
+          pill.appendChild(dot);
+        }
+        return;
+      }
       const s = statsOf(latest);
-      // 内容签名：未变化时只做溢出复查（零 DOM 写），避免 MutationObserver 自激
-      const key = [s.stamp, s.ttft, s.tps, s.out, s.streaming].join("|");
-      let segs = host._zsegs;
-      if (host._zkey !== key) {
-        host._zkey = key;
-        host.style.background = "rgba(127,127,127,0.12)";
-        host.style.padding = "0 10px";
-        host.style.color = "var(--color-foreground-subtle, #7a7a7a)";
-        host.innerHTML = "";
+      // 内容签名:未变化时只做溢出复查(零 DOM 写),避免 MutationObserver 自激
+      const key = [s.stamp, s.ttft, s.tps, s.out, s.streaming,
+                   agg.rounds, agg.input, agg.cache, agg.output].join("|");
+      let segs = pill._zsegs;
+      if (pill._zkey !== key) {
+        pill._zkey = key;
+        pill.style.background = "rgba(127,127,127,0.08)";
+        pill.style.padding = "0 10px";
+        pill.style.color = "var(--color-foreground-subtle, #7a7a7a)";
+        pill.innerHTML = "";
         const ACCENT = "var(--color-warning, #e0983a)";
         const VALUE = "var(--color-foreground, #e8e8e8)";
         const span = (txt, cls) => {
@@ -420,31 +597,44 @@
           else if (cls === "VALUE") sp.style.color = VALUE;
           return sp;
         };
-        // 绿点常驻：生成中发亮，空闲静态
+        // 绿点常驻:生成中发亮,空闲静态
         const dot = span("●");
         dot.style.color = "#4ade80";
         if (s.streaming) dot.style.textShadow = "0 0 6px rgba(74,222,128,.8)";
-        host.appendChild(dot);
-        // 定位：原生右下角已展示上下文水位，此处只放本轮性能指标
+        pill.appendChild(dot);
+        // 段布局:本轮即时指标(g0:首 token/tok/s/out)+ 会话累计(g1:轮/输入/命中+命中率/累出)。
+        // 组间用竖线分隔,组内用 · ;不显示时间(用户不需要)
         segs = [];
-        if (s.stamp != null) segs.push({ p: 0, nodes: [span(s.stamp)] });
-        if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
-        if (s.tps != null) segs.push({ p: 2, nodes: [span(fmtTps(s.tps) + " tok/s", "ACCENT")] });
-        if (s.out > 0) segs.push({ p: 3, nodes: [span("out "), span(fmtTok(s.out), "VALUE")] });
+        if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, g: 0, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
+        if (s.tps != null) segs.push({ p: 2, g: 0, nodes: [span(fmtTps(s.tps) + " tok/s", "ACCENT")] });
+        if (s.out > 0) segs.push({ p: 3, g: 0, nodes: [span("out "), span(fmtTok(s.out), "VALUE")] });
+        if (agg.rounds > 0) segs.push({ p: 4, g: 1, nodes: [span("第 " + agg.rounds + " 轮")] });
+        if (agg.input > 0) {
+          const nodes = [span("输入 "), span(fmtTok(agg.input), "VALUE")];
+          if (agg.cache > 0) {
+            nodes.push(span("命中 " + fmtTok(agg.cache), "VALUE"));
+            const pct = agg.input > 0 ? Math.round((agg.cache / agg.input) * 100) : 0;
+            if (pct > 0) nodes.push(span(" 平均命中 " + pct + "%", "ACCENT"));
+          }
+          segs.push({ p: 5, g: 1, nodes });
+        }
+        if (agg.output > 0) segs.push({ p: 6, g: 1, nodes: [span("累出 "), span(fmtTok(agg.output), "VALUE")] });
         segs.forEach((g, i) => {
           if (i > 0) {
-            const sep = span("·");
-            sep.style.opacity = "0.55";
-            g.nodes.unshift(sep);   // 分隔符跟段一起，降级时同生共死
+            const cross = segs[i - 1].g !== g.g;   // 跨组:竖线分隔,更醒目
+            const sep = span(cross ? "│" : "·");
+            sep.style.opacity = cross ? "0.45" : "0.55";
+            g.nodes.unshift(sep);   // 分隔符跟段一起,降级时同生共死
           }
         });
-        segs.forEach((g) => g.nodes.forEach((n) => host.appendChild(n)));
-        host._zsegs = segs;
+        segs.forEach((g) => g.nodes.forEach((n) => pill.appendChild(n)));
+        pill._zsegs = segs;
       }
-      // 渐进降级：溢出时按优先级丢段（out → tok/s）；窗口尺寸变化时也复查
+      // 渐进降级:溢出时按优先级丢段(本轮 out → 首 token → tok/s;会话累计段保留);
+      // composer-below 与 composer 同宽空间充裕,窄窗口下才触发
       try {
-        for (const drop of [3, 2]) {
-          if (host.scrollWidth <= host.clientWidth + 1) break;
+        for (const drop of [3, 1, 2]) {
+          if (pill.scrollWidth <= pill.clientWidth + 1) break;
           const g = segs.find((x) => x.p === drop);
           if (!g) continue;
           g.nodes.forEach((n) => n.remove());

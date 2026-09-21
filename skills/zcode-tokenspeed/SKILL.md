@@ -73,11 +73,12 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 |---|---|---|---|
 | 思考等级透传 | 给自定义模型配思考等级 | `python zcode_patcher.py [--check/--revert/--extract]` | 内核 zcode.cjs（原地改写，.bak 备份） |
 | 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
-| 打开状态栏 | 输入框工具栏状态胶囊（**v2 纯 DOM 观测，3.12.2+ 安全**） | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：本轮指标 + 会话累计（第 N 轮/输入/命中+平均命中率/累出） | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| 思考强度滑条 | 工具栏「思考 · 档名」入口，点击弹出吸附拖拽条（动效）；原生下拉隐藏，拖完即时生效 | `python zcode_patcher.py --thought-slider [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py --model-width [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
-两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --model-width --tps-footer --model-puller`。
+两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --model-width --tps-footer --thought-slider --model-puller`。
 另有命令行版拉模型（不动 asar，直接同步 config.json）：`python scripts/model_pull.py --all [--dry-run]`。
 
 ## 标准执行流程（AI 代执行与人工自助通用）
@@ -310,12 +311,16 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 
 > 本能力与思考等级补丁基于社区分享版本实现（原作者已授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
 
-输入框工具栏常驻一枚统计胶囊（水平居中于工具栏行，宽度上限 50%），展示**当前会话最近一轮**的生成指标：
+**默认挂在输入框（composer 卡片）下方、水平居中**的独立统计行（右键可切到工具栏行内居中或会话顶部 sticky），左组为**当前会话最近一轮**的即时指标，右组为**当前会话累计**（不含时间）：
 
 ```
-生成中:  ● 21:03 · 32 tok/s · out 410
-结束后:  ● 21:03 · 首 token 37s · out 1.7k
+生成中:  ● 32 tok/s · out 410 │ 第 8 轮 │ 输入 45.2k · 命中 38.1k · 平均命中 84% · 累出 12.3k
+结束后:  ● 首 token 37s · out 1.7k │ 第 8 轮 │ 输入 45.2k · 命中 38.1k · 平均命中 84% · 累出 12.3k
+空会话:  ●            （绿点空态常驻，不显示假时钟）
 ```
+
+- **会话累计口径**：轮数=可见轮次数；输入/命中/累出=各轮 `usage.delta` 累加（API 计费视角，每轮 inputTokens 含历史所以累计值偏大，属预期）；平均命中=累计命中 ÷ 累计输入；流式中未报 usage 的轮以内容估算兜底。
+- **渐进降级顺序**：溢出时先丢本轮 out → 首 token → tok/s，会话累计段保留。
 
 ```bash
 python zcode_patcher.py --tps-footer             # 注入 scripts/zcode-tps.js
@@ -326,15 +331,25 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 ### 行为规则（验收标准）
 
-- **绿点 ● 与时间常驻**：有可展示的轮次就在；流式生成中绿点发亮，空闲静态。无省略号占位。
-- **分隔符 `·`** 隔开各段；标签灰、数值白、tok/s 橙、tabular-nums 对齐。
+- **绿点 ● 常驻**：有可展示的轮次就在；流式生成中绿点发亮，空闲静态。不显示时间。
+- **分隔符**：组内 `·`、本轮组与会话累计组之间竖线 `│`；标签灰、数值白、tok/s 与平均命中橙、tabular-nums 对齐。
 - **同一 turnId 复用（编辑重发/重试）自动清零**：检测到新一轮开始即重置旧统计，杜绝「时间变新、指标是旧的」残留。
 - **out 语义**：**本轮累计输出**（最近一次提问→回答完成为止），非会话累计。
 - **动态刷新**：流式中 1 秒节奏刷新——tok/s 为 4s 滑动窗口即时速度、out 为本轮估算值；基于回答文本的 token 估算（CJK 1 字≈1 token、其余 4 字符≈1 token）。`usage.delta` 精确值随每次模型请求完成到达即覆盖估算；轮结束后为精确值（精确 out ÷ 首块→末次 usage 的解码窗口）。
 - **静默期保持**：工具执行期间文本停止增长，速度保持最近值不消失；点停止/出错时该次请求不报 usage，out 以内容估算兜底、速度保持最近值——已产生的数据不凭空消失。
 - **切换会话立即消失**：渲染只认「DOM 可见轮次（`section[data-turn-id]`）+ `data-session-id` 匹配当前会话」双重条件，不依赖任何会话切换事件；多会话并行时各 tab 互不干扰。
-- **历史会话只有 `● 时间`**：usage.delta 不回放，重新打开旧会话拿不到当时的 token 统计，属预期。
-- **无假时钟**：轮次连时间戳都没有且无生成活动时不渲染，绝不拿当前时间冒充轮次时间。
+- **历史会话累计缺失**：usage.delta 不回放，重新打开旧会话拿不到当时的 token 统计，属预期。
+- **无假时钟**：不显示时间段，绝不拿当前时间冒充轮次时间。
+- **空会话常驻**：当前会话无任何轮次（新会话/未对话）时显示仅绿点的空态胶囊，进入对话后自然切换为完整指标。
+
+### 位置切换（胶囊右键）
+
+统计条右键弹出自绘菜单，可在「输入框下方（默认）/ 输入框工具栏 / 会话顶部 sticky」间切换，`localStorage`（键 `ztps-pos`）记忆，重开保持：
+
+- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement` 于卡片后），`alignSelf: stretch` 与输入框同宽。
+- **输入框工具栏**：行内水平居中。
+- **会话顶部**：吸附到消息区滚动容器（从 `section[data-turn-id]` 向上找第一个 `overflow-y: auto/scroll` 且高 >120px 的祖先）第一个子元素，`position: sticky; top: 8px` 悬浮；host 上 `pointer-events: none` 放行下方消息。
+- 数据层零改动，仅挂载点不同；挂载点找不到（空态/设置页）时自清理，`window.__ztpsDiag.posMode`/`hiddenReason` 可诊断。右键修复注记：菜单用 pointerdown 捕获关外部点击时必须放行菜单内部按下，否则 click 在已移除节点上落空、选项永远点不中。
 
 ### 数据链路原理（无常驻服务）
 
@@ -410,3 +425,31 @@ python scripts/model_pull.py --test https://api.example.com/v1 [KEY]
 | 自动创建的供应商协议不对（请求报错/无响应） | kind 猜错（如 OpenAI 兼容端点被判成 anthropic）：设置页打开该供应商，把 API 格式改对保存即可 |
 | 想换注入脚本逻辑 | 改 `scripts/zcode-model-puller.js` 或改 preload/main 注入构造器后重跑 `--model-puller` 即可——**四组件（renderer/preload/main/index）均按内容比对**，只更新与现行实现不一致的组件，无需 revert；`--check` 会显示「含旧版组件，重跑可自动更新」 |
 | 保存后档位丢失 | 正常不会（整读整写不重建条目）；若用 ZCode 自带设置页保存过该 provider，属其重建路径剥掉 variants，重配 reasoning 即可 |
+
+## 六、思考强度滑条：点击弹出的吸附拖拽条（Codex 风格）
+
+工具栏常驻「思考 · 档名 ▾」入口（带迷你电量条，造型同原生），点击弹出吸附拖拽条面板（260ms 弹出动效：模糊渐显 + 过冲缩放；填充条弹性扫入并带末端光点，刻度点级联弹入，换档时档名脉冲），拖拽/点击/←→键即换档，点外部或 Esc 收起；**原生「思考级别」下拉经 CSS 隐藏（单档位固定徽章除外），走原生切换链路，会话内即时生效、无需重启**：
+
+```bash
+python zcode_patcher.py --thought-slider             # 注入 scripts/zcode-thought-slider.js
+python zcode_patcher.py --thought-slider --check     # 查状态
+python zcode_patcher.py --thought-slider --revert    # 整体还原
+python zcode_patcher.py --thought-slider --slider-src /path/to/zcode-thought-slider.js
+```
+
+### 原理（纯 DOM 观测 + 原生回调，零协议逆向）
+
+1. **读状态**：V4ComposerToolbar 渲染的隐藏 span（`className:"hidden"`）带 `data-thought`（当前档位）、`data-thought-levels`（该模型全部可用档位，逗号分隔）、`data-provider`/`data-model`，React 随会话实时更新——入口与面板 MutationObserver 监听其属性变化自动跟随原生操作（含 `t` 键循环切档），双向同步。
+2. **吸附档位动态**：取 `data-thought-levels`（off/minimal/low/medium/high/xhigh/max/ultra 等），模型配几档吸几档，不硬编码。
+3. **UI**：注入 `<style>` 隐藏原生触发器（`[data-composer-thought-control]:not([data-thought-level-fixed="true"])`，被隐藏的触发器仅作入口插入定位基准，`display:none` 元素的事件派发仍有效，菜单降级不受影响）；填充条带裁剪层（弹性过冲曲线会让 width 短暂超过 100%，必须裁住否则溢出轨道），光点/刻度独立于裁剪层悬浮。
+4. **写档位**（按优先级）：
+   - React fiber：从触发器 DOM 沿 `__reactFiber$` return 链找 `memoizedProps` 含 `onValueChange` 且 `option.type==='select'` 带数组选项的组件，直调之——等价于用户点选菜单项，原生继续走 `session/setThoughtLevel` 会话 RPC；
+   - 降级：模拟点击触发器打开 Radix 菜单，按 options 顺序点第 index 个 `[role="option"]`（档位显示名是 i18n 文案，按序号而非文本定位）。
+5. **注入**：与 TPS 同链路（index.html `</body>` 前挂 `<script>` + 新增脚本条目，整体重打包），sidecar `app.asar.slider-patch.json`、备份 `app.asar.slider.bak`，外科手术式还原只摘自己的 tag。
+6. **隐藏条件**：模型无思考档位（`data-thought-levels` 空）、探针未命中、原生触发器不存在——均自动隐藏，不占空间。
+
+### 验证 / 排障
+
+- 渲染 console 查 `[zslider] 已就绪: low/medium/high/max 当前 max`（加载 5s 后自检）。
+- 拖拽后原生下拉状态同步变化（入口档名/电量条、`t` 键联动）= fiber 路径生效；console 出现 `[zslider] 档位提交失败` = fiber 与菜单降级均未命中（版本结构大改，需按「原理」重新对锚点）。
+- 入口不出现：先看探针——`document.querySelector('[data-thought][data-thought-levels]')` 是否有值；当前模型未配思考档位时不显示属预期。
