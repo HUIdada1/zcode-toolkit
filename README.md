@@ -68,7 +68,7 @@ python "<插件目录>/skills/zcode-patcher/scripts/zcode_patcher.py" --tps-foot
 
 ## 来源与致谢
 
-本插件由 **陈浩**（80361619@qq.com）封装与维护，封装自 [linguo2625469/zcode-patcher](https://github.com/linguo2625469/zcode-patcher)，后者是两份社区作品的整合：
+本插件封装自 [linguo2625469/zcode-patcher](https://github.com/linguo2625469/zcode-patcher)，后者是两份社区作品的整合：
 
 - [linux.do · 这样的 zcode 太酷辣！（加个状态栏）](https://linux.do/t/topic/2886711) — 作者 **lanvv**：思考等级补丁、TPS 状态栏脚本、Skill 框架
 - [HHQ-666/zcode-model-puller](https://github.com/HHQ-666/zcode-model-puller)（MIT）— 模型拉取按钮前端脚本与思路
