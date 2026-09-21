@@ -61,13 +61,46 @@
       .split(",").map((s) => s.trim()).filter(Boolean);
     const cur = (el.getAttribute("data-thought") || "").trim();
     if (levels.length < 2) return null;          // 无档位/单档位:入口与滑条无意义(原生显示固定徽章)
-    return { levels, cur };
+    return { levels, cur, el };                  // el:探针 span,同时是工具栏行的定位锚
   }
 
-  // 原生触发器(已被 CSS 隐藏,仅作插入定位基准;不看可见性——display:none 的元素 offsetParent 为 null)
+  // 从某 DOM 元素的 React fiber 向下遍历子树,找持有思考档位 select props 的组件 fiber(jU)。
+  // 注意 3.14.1 默认(非紧凑)模式下触发器不带 data-composer-thought-control 属性,
+  // DOM 选择器拿不到它,必须走 fiber;探针 span 与 jU 是兄弟,所以从父行 DOM 反查。
+  function findThoughtFiber(rootEl) {
+    const root = fiberOf(rootEl);
+    if (!root) return null;
+    const stack = [root];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (!cur) continue;
+      const p = cur.memoizedProps;
+      if (p && p.option && p.option.type === "select" && Array.isArray(p.option.options)
+          && typeof p.onValueChange === "function"
+          && p.option.options.some((o) => o && typeof o.value === "string")) {
+        return cur;
+      }
+      stack.push(cur.child, cur.sibling);
+    }
+    return null;
+  }
+
+  // 原生触发器 BUTTON:jU 子树里的第一个 button(单档位固定徽章分支无 BUTTON,返回 null)
   function anchorTrigger() {
     try {
-      return document.querySelector('[data-composer-thought-control]:not([data-thought-level-fixed="true"])');
+      const span = document.querySelector("[data-thought][data-thought-levels]");
+      if (!span || !span.parentElement) return null;
+      const ju = findThoughtFiber(span.parentElement);
+      if (!ju) return null;
+      const stack = [ju.child];
+      while (stack.length) {
+        const cur = stack.pop();
+        if (!cur) continue;
+        const el = cur.stateNode;
+        if (el && el.tagName === "BUTTON" && el.isConnected) return el;
+        stack.push(cur.child, cur.sibling);
+      }
+      return null;
     } catch (err) { return null; }
   }
 
@@ -75,19 +108,6 @@
   function fiberOf(el) {
     for (const k in el) {
       if (k.startsWith("__reactFiber$")) return el[k];
-    }
-    return null;
-  }
-
-  function findThoughtCommit(startEl) {
-    let f = fiberOf(startEl);
-    for (let i = 0; f && i < 40; i++, f = f.return) {
-      const p = f.memoizedProps;
-      if (p && typeof p.onValueChange === "function" && p.option
-          && p.option.type === "select" && Array.isArray(p.option.options)
-          && p.option.options.some((o) => o && typeof o.value === "string")) {
-        return p.onValueChange;
-      }
     }
     return null;
   }
@@ -125,9 +145,18 @@
     return false;
   }
 
+  // 写路径 ①的取值:从探针 span 父行反查 jU fiber,直接拿 onValueChange(不依赖触发器 DOM)
+  function thoughtCommit() {
+    try {
+      const span = document.querySelector("[data-thought][data-thought-levels]");
+      if (!span || !span.parentElement) return null;
+      const ju = findThoughtFiber(span.parentElement);
+      return ju ? ju.memoizedProps.onValueChange : null;
+    } catch (err) { return null; }
+  }
+
   async function commitLevel(value, index) {
-    const trig = anchorTrigger();
-    const commit = trig ? findThoughtCommit(trig) : null;
+    const commit = thoughtCommit();
     if (commit) {
       try { commit(value); return true; } catch (err) { /* 落到降级 */ }
     }
@@ -145,14 +174,16 @@
     entryMini.firstChild.style.height = Math.max(8, pct) + "%";
   }
 
-  function ensureEntry(trig) {
+  function ensureEntry(trig, span) {
+    // 插入锚:原生触发器 BUTTON 优先;3.14.1 默认模式拿不到触发器时退到探针 span(同一工具栏行)
+    const anchor = (trig && trig.parentElement) ? trig : ((span && span.parentElement) ? span : null);
     if (entry && entry.isConnected) {
-      if (trig && entry.previousElementSibling !== trig && trig.parentElement) {
-        trig.insertAdjacentElement("afterend", entry);
+      if (anchor && entry.previousElementSibling !== anchor) {
+        anchor.insertAdjacentElement("afterend", entry);
       }
       return true;
     }
-    if (!trig || !trig.parentElement) return false;
+    if (!anchor) return false;
     entry = document.createElement("div");
     entry.setAttribute(MARK + "-entry", "1");
     Object.assign(entry.style, {
@@ -202,7 +233,7 @@
     entry.appendChild(entryName);
     entry.appendChild(entryMini);
     entry.appendChild(chev);
-    trig.insertAdjacentElement("afterend", entry);
+    anchor.insertAdjacentElement("afterend", entry);
     return true;
   }
 
@@ -256,14 +287,15 @@
   }
 
   function runnerRender() {
-    if (runner.svg) runner.svg.innerHTML = runnerSVG(runner.frame);
+    if (!runner.svg) return;   // 面板未打开时 svg 不存在,sync 的换档 kick 不应渲染
+    runner.svg.innerHTML = runnerSVG(runner.frame);
   }
 
   function runnerTick(ts) {
     if (!runner.raf) return;
     const dt = runner.last ? Math.min(64, ts - runner.last) : 16;
     runner.last = ts;
-    if (runner.rate > 0.05) {
+    if (runner.rate > 0.05 && runner.svg) {
       runner.progress += dt / 1000 * runner.rate;
       const f = Math.floor(runner.progress) % 8;
       if (f !== runner.frame) { runner.frame = f; runnerRender(); }
@@ -276,6 +308,7 @@
   }
 
   function runnerKick(speed) {
+    if (!runner.el || !runner.svg) return;   // 面板未打开时不启动动画引擎
     runner.rate = Math.max(runner.rate, speed || 14);
     if (!runner.raf) { runner.last = 0; runner.raf = requestAnimationFrame(runnerTick); }
   }
@@ -548,7 +581,10 @@
         return;
       }
       const trig = anchorTrigger();
-      if (!ensureEntry(trig)) return;
+      if (!ensureEntry(trig, p.el)) return;
+      // 隐藏原生下拉:触发器由 fiber 反查后直接置 display:none,
+      // React 重建该元素时会在下一轮 sync 重新隐藏(紧凑模式的 CSS 规则仍作兜底)
+      if (trig && trig.style.display !== "none") trig.style.display = "none";
       state.levels = p.levels;
       state.cur = p.cur;
       const key = p.levels.join(",") + "|" + p.cur;

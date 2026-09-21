@@ -515,6 +515,7 @@
 
       if (isFontMono || isModelPlaceholder || isInsideModelList) {
         existing.add(val);
+        existing.add(val.toLowerCase());   // 网关返回与本地配置大小写不一致时也能命中
       }
     }
 
@@ -522,11 +523,15 @@
     try {
       const cfg = await readZCodeConfig();
       if (cfg?.provider) {
-        const cleanBase = (baseUrl || "").replace(/\/+$/, "");
+        const norm = (u) => (u || "").replace(/\/+$/, "").replace(/\/v1$/, "");
+        const cleanBase = norm(baseUrl);
         for (const [pid, pdata] of Object.entries(cfg.provider)) {
-          const pBase = (pdata.options?.baseURL || "").replace(/\/+$/, "");
+          const pBase = norm(pdata.options?.baseURL);
           if (pBase === cleanBase && pdata.models) {
-            Object.keys(pdata.models).forEach((m) => existing.add(m.trim()));
+            Object.keys(pdata.models).forEach((m) => {
+              existing.add(m.trim());
+              existing.add(m.trim().toLowerCase());
+            });
           }
         }
       }
@@ -603,7 +608,7 @@
     const stateMap = new Map();
     let newCount = 0;
     for (const id of models) {
-      const exists = existingModels.has(id);
+      const exists = existingModels.has(id) || existingModels.has((id || "").toLowerCase());
       const selected = !exists; // 仅新模型默认勾选
       stateMap.set(id, { exists, selected });
       if (!exists) newCount++;
