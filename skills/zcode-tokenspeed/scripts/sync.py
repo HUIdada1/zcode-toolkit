@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-patcher 插件开关同步（由 SessionStart hook 调用）
+"""zcode-tokenspeed 插件开关同步（由 SessionStart hook 调用）
 
 把客户端补丁同步到插件配置里的期望状态：
   字节级补丁（用量图表 / 弹窗加宽）—— 立即应用或还原，无需重启 ZCode
@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 PATCHER = HERE / "zcode_patcher.py"
 WATCHDOG = HERE / "apply_after_exit.py"
 CONFIG = Path.home() / ".zcode" / "cli" / "config.json"
-PLUGIN_ID = "zcode-patcher@dev-default-22da16fd"
+PLUGIN_ID = "zcode-tokenspeed@dev-default-22da16fd"
 LOG = HERE / "_sync.log"
 
 # 配置键 -> (zcode_patcher.py 参数, 是否重打包级)
@@ -176,7 +176,7 @@ def main() -> None:
         parts.append("未处理: " + "、".join(failed))
     if parts:
         log(f"同步结果 —— {' | '.join(parts)}")
-        print(f"[zcode-patcher] {' | '.join(parts)}")
+        print(f"[zcode-tokenspeed] {' | '.join(parts)}")
 
 
 if __name__ == "__main__":

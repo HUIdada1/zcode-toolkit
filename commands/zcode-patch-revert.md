@@ -2,7 +2,7 @@
 description: 从备份精确还原 ZCode 客户端补丁
 ---
 
-加载本插件自带的 `zcode-patcher` 技能（`${CLAUDE_PLUGIN_ROOT}/skills/zcode-patcher/SKILL.md`；若该变量未展开，就按插件安装目录下的同名路径读取），按用户点名的功能执行还原：
+加载本插件自带的 `zcode-tokenspeed` 技能（`${CLAUDE_PLUGIN_ROOT}/skills/zcode-tokenspeed/SKILL.md`；若该变量未展开，就按插件安装目录下的同名路径读取），按用户点名的功能执行还原：
 
 ```bash
 python "<skill目录>/scripts/zcode_patcher.py" --usage-chart --revert

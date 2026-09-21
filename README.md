@@ -1,4 +1,4 @@
-# zcode-patcher（ZCode 插件）
+# zcode-tokenspeed（ZCode 插件）
 
 把 [zcode-patcher](https://github.com/linguo2625469/zcode-patcher) 的本地补丁注入能力封装成 ZCode 插件：技能负责执行流程与排障，脚本负责真正改字节。
 
@@ -20,8 +20,8 @@
 
 ```
 .zcode-plugin/plugin.json                    清单（含 5 个功能开关的 userConfig 声明）
-skills/zcode-patcher/SKILL.md                 执行流程 + 逆向笔记 + 排障（AI 代执行入口）
-skills/zcode-patcher/scripts/
+skills/zcode-tokenspeed/SKILL.md                 执行流程 + 逆向笔记 + 排障（AI 代执行入口）
+skills/zcode-tokenspeed/scripts/
   zcode_patcher.py                            主工具：五个补丁（纯 Python 标准库，解析/重打包 asar 不依赖 Node）
   sync.py                                     开关同步：读配置 → 比对实际状态 → 应用差异（SessionStart hook 调用）
   apply_after_exit.py                         退出后看护：等 ZCode 退出 → 应用重打包级补丁
@@ -43,27 +43,27 @@ commands/
 
 在「设置 → 插件管理 → 已安装 → 点开本插件」的**配置**区有 5 个开关，分别控制五个补丁。拨动并点「保存配置」后，插件会在下次会话启动时自动把客户端同步过去，不用手打命令。
 
-> **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题（界面拿到的插件信息里 `userConfig` 为空时配置区整个不渲染），与插件清单无关。此时直接写配置文件，效果一样：`~/.zcode/cli/config.json` → `plugins.options["zcode-patcher@dev-default-22da16fd"]`，例如 `{ "tps_footer": false }`。也可以打 `/zcode-patch-toggle` 让 AI 代改。
+> **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题（界面拿到的插件信息里 `userConfig` 为空时配置区整个不渲染），与插件清单无关。此时直接写配置文件，效果一样：`~/.zcode/cli/config.json` → `plugins.options["zcode-tokenspeed@dev-default-22da16fd"]`，例如 `{ "tps_footer": false }`。也可以打 `/zcode-patch-toggle` 让 AI 代改。
 
 生效时机分两类：用量图表和弹窗加宽是字节级改写，ZCode 运行中也能写，**下次会话启动即生效**；TPS 状态栏和模型拉取按钮要重写 `app.asar`，运行中被文件锁挡住，所以由看护在 **ZCode 退出时自动应用**，下次启动生效。
 
 另外，`core_patch`（思考档位内核补丁）**只对 ZCode 3.11.2 及更早有效**。3.14.x 起内核改用原生 `optionSpecs` 机制，这个开关打开也打不上——脚本会拒绝改写并在日志里说明原因，保持关闭即可。
 
-两条行为约定：**只有你显式保存过的开关才会被同步**——没拨过的开关插件一律不碰，首次安装不会自动改动客户端；开关的默认值（关闭）是静态的，不反映你之前手动打的补丁，**以你想要的状态为准拨一次**，同步后两者就一致了。同步日志写在 `skills/zcode-patcher/scripts/_sync.log`。
+两条行为约定：**只有你显式保存过的开关才会被同步**——没拨过的开关插件一律不碰，首次安装不会自动改动客户端；开关的默认值（关闭）是静态的，不反映你之前手动打的补丁，**以你想要的状态为准拨一次**，同步后两者就一致了。同步日志写在 `skills/zcode-tokenspeed/scripts/_sync.log`。
 
 ## 用法
 
 安装后在**新任务**里二选一：
 
 - 用斜杠命令：`/zcode-patch-status`、`/zcode-patch-apply`、`/zcode-patch-revert`；
-- 或直接点名「zcode-patcher」并说明要哪个功能（该技能设计为**仅手动调用**，不会自动触发）。
+- 或直接点名「zcode-tokenspeed」并说明要哪个功能（该技能设计为**仅手动调用**，不会自动触发）。
 
 也可以完全绕开 AI，直接跑脚本：
 
 ```bash
-python "<插件目录>/skills/zcode-patcher/scripts/zcode_patcher.py" --check
-python "<插件目录>/skills/zcode-patcher/scripts/zcode_patcher.py" --tps-footer
-python "<插件目录>/skills/zcode-patcher/scripts/zcode_patcher.py" --tps-footer --revert
+python "<插件目录>/skills/zcode-tokenspeed/scripts/zcode_patcher.py" --check
+python "<插件目录>/skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer
+python "<插件目录>/skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer --revert
 ```
 
 打完补丁**完全退出并重启 ZCode** 生效。重打包级补丁（TPS / 拉取按钮）在 ZCode 运行中会被文件锁挡住，必须先退出。

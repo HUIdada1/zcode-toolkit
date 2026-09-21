@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-patcher 退出后看护（由 sync.py 自动启动，勿手动常跑）
+"""zcode-tokenspeed 退出后看护（由 sync.py 自动启动，勿手动常跑）
 
 重打包级补丁（TPS 状态栏 / 拉取按钮）需要 app.asar 未被占用才能改，所以：
   轮询等待 ZCode 完全退出 → 按期望状态应用/还原对应补丁 → 写日志后退出

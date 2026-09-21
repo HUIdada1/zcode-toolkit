@@ -1,11 +1,11 @@
 ---
-name: zcode-patcher
-description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①自定义模型思考档位透传 ②用量页去截断（趋势图/饼图全量）③模型弹窗加宽 ④TPS 状态栏（输入框统计胶囊：时间·首 token·tok/s·out）⑤设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-patcher」时才加载；用户只是泛泛提到思考等级、用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
+name: zcode-tokenspeed
+description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①自定义模型思考档位透传 ②用量页去截断（趋势图/饼图全量）③模型弹窗加宽 ④TPS 状态栏（输入框统计胶囊：时间·首 token·tok/s·out）⑤设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tokenspeed」时才加载；用户只是泛泛提到思考等级、用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
 ---
 
 # ZCode 客户端补丁工具
 
-> 本 skill 由 **zcode-patcher 插件**提供，脚本就在本 skill 目录下的 `scripts/`（下文所有 `<skill目录>` 均指本目录）。
+> 本 skill 由 **zcode-tokenspeed 插件**提供，脚本就在本 skill 目录下的 `scripts/`（下文所有 `<skill目录>` 均指本目录）。
 
 ## 版本现状（动手前先看）
 
@@ -44,11 +44,11 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 
 > **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题，与插件清单无关——界面拿到的插件信息里 `userConfig` 为空时，配置区整个不渲染（`Y2t` 组件里 `userConfig` 为空直接 `return null`）。清单本身是正确的（Agent 侧 `M5s` 完整解析、`f5s` 赋 `userConfig: e.manifest.userConfig`、`jGo` 条件展开，链路已逐环节核对）。此时**直接写配置文件**，效果完全一样：
 >
-> `~/.zcode/cli/config.json` → `plugins.options["zcode-patcher@dev-default-22da16fd"]`：
+> `~/.zcode/cli/config.json` → `plugins.options["zcode-tokenspeed@dev-default-22da16fd"]`：
 > ```json
 > "plugins": {
 >   "options": {
->     "zcode-patcher@dev-default-22da16fd": { "tps_footer": false, "model_puller": true }
+>     "zcode-tokenspeed@dev-default-22da16fd": { "tps_footer": false, "model_puller": true }
 >   }
 > }
 > ```

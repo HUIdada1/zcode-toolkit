@@ -1,10 +1,10 @@
 ---
-description: 逐项查看/切换 zcode-patcher 的注入功能开关
+description: 逐项查看/切换 zcode-tokenspeed 的注入功能开关
 ---
 
-加载本插件自带的 `zcode-patcher` 技能（`${CLAUDE_PLUGIN_ROOT}/skills/zcode-patcher/SKILL.md`；若该变量未展开，就按插件安装目录下的同名路径读取），然后按下面的流程帮用户逐项开关补丁功能。
+加载本插件自带的 `zcode-tokenspeed` 技能（`${CLAUDE_PLUGIN_ROOT}/skills/zcode-tokenspeed/SKILL.md`；若该变量未展开，就按插件安装目录下的同名路径读取），然后按下面的流程帮用户逐项开关补丁功能。
 
-**开关的存储位置**：`~/.zcode/cli/config.json` 的 `plugins.options["zcode-patcher@dev-default-22da16fd"]`，键名与功能对应：
+**开关的存储位置**：`~/.zcode/cli/config.json` 的 `plugins.options["zcode-tokenspeed@dev-default-22da16fd"]`，键名与功能对应：
 
 | 键 | 功能 | 生效时机 |
 |---|---|---|

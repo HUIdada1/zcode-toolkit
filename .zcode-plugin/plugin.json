@@ -1,6 +1,6 @@
 {
-  "name": "zcode-patcher",
-  "version": "0.2.4",
+  "name": "zcode-tokenspeed",
+  "version": "0.3.0",
   "description": "ZCode 桌面客户端本地补丁注入工具：思考档位透传、用量页去截断、模型弹窗加宽、TPS 状态栏、设置页模型拉取按钮。全部幂等、可检查、可精确还原，并支持在插件详情页逐项开关。",
   "author": {
     "name": "c80361619"
