@@ -41,7 +41,7 @@ ZCode 客户端补丁工具
   四处改动：out/renderer/ 新增 zcode-model-puller.js + index.html 挂载 +
   preload 暴露 3 个 IPC 方法（readConfigFile/writeConfigFile/fetchModelsFromUrl）+
   main 注册 3 个 IPC handler（读写 ~/.zcode/v2/config.json、代理拉模型列表）。
-  前端脚本 vendored from HHQ-666/zcode-model-puller (MIT)；
+  前端脚本为 vendored 的第三方实现 (MIT，版权声明见脚本文件头)；
   preload/main 锚点用语义字符串定位（exposeInMainWorld("zcode",{ / SaveMcpToUserDirectory），
   压缩符号经正则捕获，跨版本无需维护符号表。
   原件备份 app.asar.puller.bak，记录在 app.asar.puller-patch.json，可整体还原。
@@ -678,7 +678,7 @@ TPS_SCRIPT_PATH = "out/renderer/zcode-tps.js"
 TPS_TAG = f'<script src="./{TPS_SCRIPT_PATH.split("/")[-1]}"></script>'
 
 # ---------------------------------------- 模型拉取按钮注入（asar 重打包级，--model-puller）
-# 前端脚本 vendored from HHQ-666/zcode-model-puller (MIT)；preload 桥与 main IPC handler
+# 前端脚本为 vendored 的第三方实现 (MIT，版权声明见脚本文件头)；preload 桥与 main IPC handler
 # 在此内置。锚点用语义字符串 + 正则捕获压缩符号（electron 别名 / ipcMain 包装别名），
 # 不随版本符号重排失效——等价于内核锚点的结构化提取，天然跨版本。
 

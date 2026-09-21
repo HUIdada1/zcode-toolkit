@@ -65,7 +65,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --tps-footer
 python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 ```
 
-> 本机另有一条独立路径：计划任务 `ZCodePatchApply` 指向原仓库 `F:\ZcodeData\zcode-patcher\scripts\_apply_after_exit.py`（硬编码 `D:/ZCode`，退出后注入 TPS + 拉取按钮并重启 ZCode）。它与插件机制互不干扰；要取消：`schtasks /Delete /TN ZCodePatchApply /F`。
+> 本机另有一条独立路径：计划任务 `ZCodePatchApply` 指向本地原仓库的 `scripts/_apply_after_exit.py`（硬编码 `D:/ZCode`，退出后注入 TPS + 拉取按钮并重启 ZCode）。它与插件机制互不干扰；要取消：`schtasks /Delete /TN ZCodePatchApply /F`。
 
 五类补丁，均幂等、可检查、可还原、ZCode 升级后需重打：
 
@@ -304,12 +304,11 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 > **已知特性**：tok/s 在开始生成后约 1~4 秒才出现（滑动窗口需 ≥2 个采样点，且思考阶段
 > 无文本增量），期间只显示 `●` 与时间，属预期；out（本轮累计输出）到达后立即显示。
 >
-> 本脚本源自 [linux.do 2886711](https://linux.do/t/topic/2886711)（lanvv）分享的
-> `zcode-patcher.zip`，本仓库只删除了 `port.start()` 一行并补充自诊断，**计算逻辑与原版一致**。
+> 本脚本基于社区分享版本实现，只删除了 `port.start()` 一行并补充自诊断，**计算逻辑与原版一致**。
 > ⚠️ **回滚预案**：改动 asar 前先 `python scripts/restore_clean.py --backup` 存一份干净副本，
 > 若客户端异常，完全退出后 `python scripts/restore_clean.py --latest` 秒级还原，无需重装 ZCode。
 
-> 本能力与思考等级补丁源自 [linux.do 帖子 2886711](https://linux.do/t/topic/2886711)（作者 lanvv）分享的 `zcode-patcher.zip`（原帖授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
+> 本能力与思考等级补丁基于社区分享版本实现（原作者已授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
 
 输入框工具栏常驻一枚统计胶囊（水平居中于工具栏行，宽度上限 50%），展示**当前会话最近一轮**的生成指标：
 
@@ -380,7 +379,7 @@ python zcode_patcher.py --model-puller --revert    # 整体还原
 python zcode_patcher.py --model-puller --puller-src /path/to/zcode-model-puller.js
 ```
 
-- **来源**：前端脚本 vendored from [HHQ-666/zcode-model-puller](https://github.com/HHQ-666/zcode-model-puller)（MIT）；原项目的 npx @electron/asar 全量解包/重打包方案未采纳（Node 依赖 + 会把 12 个 unpacked 原生模块打进 asar 内部，Electron 无法从 asar 加载 .node），改用本 skill 自带的纯 Python `_repack_asar`（unpacked 条目原样跳过、原子替换、回读校验），路径走 `discover()` 跨平台探测（原项目仅支持 macOS）
+- **来源**：前端脚本为 vendored 的第三方实现（MIT，版权声明见脚本文件头）；原实现的 npx @electron/asar 全量解包/重打包方案未采纳（Node 依赖 + 会把 12 个 unpacked 原生模块打进 asar 内部，Electron 无法从 asar 加载 .node），改用本 skill 自带的纯 Python `_repack_asar`（unpacked 条目原样跳过、原子替换、回读校验），路径走 `discover()` 跨平台探测（原项目仅支持 macOS）
 - **注入四件套**：① `out/renderer/zcode-model-puller.js` 新文件；② index.html `</body>` 前挂 `<script type="module">`（与 TPS 同文件共存、互不干扰）；③ preload 在 `contextBridge.exposeInMainWorld("zcode",{` 对象开头插入 3 个 IPC 桥方法；④ main 在 `SaveMcpToUserDirectory` 注册语句前插入 3 个 IPC handler（读 config / 写 config（先落 config.json.puller-bak）/ 代理拉模型列表）
 - **锚点跨版本设计**：preload/main 锚点用语义字符串（`exposeInMainWorld("zcode",{`、`SaveMcpToUserDirectory`——后者是 IPC 通道名，非压缩符号），正则捕获周边的压缩别名（electron 导入别名 / ipcMain 包装别名）拼进注入代码——**无需按版本维护符号表**；命中数 ≠1 一律拒绝
 - **保存语义（重要）**：整份 config 读出 → 只对不存在的模型 `p.models[mid] = {模板}` → 整份写回。**已有条目原样保留**（手改的 reasoning.variants 安全，比 ZCode 自带设置页保存还会剥 variants 更安全）
