@@ -47,6 +47,7 @@
 @keyframes zsliderOut{from{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}to{opacity:0;transform:translateY(5px) scale(.96);filter:blur(4px)}}
 @keyframes zsliderDot{from{transform:translate(-50%,-50%) scale(0)}to{transform:translate(-50%,-50%) scale(1)}}
 @keyframes zsliderPulse{0%{transform:scale(1)}40%{transform:scale(1.28)}100%{transform:scale(1)}}
+@keyframes zsliderRipple{from{opacity:.75;transform:translate(-50%,-50%) scale(.4)}to{opacity:0;transform:translate(-50%,-50%) scale(2.4)}}
 `;
     document.head.appendChild(st);
   }
@@ -210,7 +211,6 @@
   let track = null;
   let rail = null;
   let fillEl = null;
-  let glowEl = null;
   let dots = [];
   let labelEl = null;
   let state = { levels: [], cur: "", key: "", drag: false };
@@ -218,10 +218,91 @@
 
   const EASE = "cubic-bezier(0.34,1.56,0.64,1)";   // 弹性过冲曲线(width 过冲部分被裁剪层裁住)
 
+  // ---------- 八帧奔跑小人(滑块按钮) ----------
+  // 参数化火柴人跑步循环:大腿按正弦摆动、后摆相膝弯大、手臂与对侧腿同相,身体随步频轻微起伏。
+  // 拖动越快 rate 越高(帧/秒),松手后以固定减速度自然停下,致敬 Codex / dsh-reasoning-effort。
+  const runner = { el: null, svg: null, frame: 0, progress: 0, rate: 0, raf: 0, last: 0 };
+
+  function pt(o, deg, len) {   // deg: 90=竖直向下, 正角向前(右)
+    const r = deg * Math.PI / 180;
+    return [o[0] + len * Math.sin(r), o[1] + len * Math.cos(r)];
+  }
+  const f1 = (n) => Number(n).toFixed(1);
+  function seg(a, b, extra) {
+    return `<line x1="${f1(a[0])}" y1="${f1(a[1])}" x2="${f1(b[0])}" y2="${f1(b[1])}" stroke="#fff" stroke-opacity="${(extra && extra.op) || 0.95}" stroke-width="${(extra && extra.w) || 1.8}" stroke-linecap="round"/>`;
+  }
+
+  function runnerSVG(frame) {
+    const t = frame / 8 * 2 * Math.PI;
+    const bob = Math.abs(Math.sin(t)) * 1.2;                    // 跑步身体起伏
+    const hip = [11.6, 14.4 - bob];
+    const sh = [12.2, 8.4 - bob];                               // 肩(躯干微前倾)
+    const parts = [`<circle cx="${f1(12.9)}" cy="${f1(5.6 - bob)}" r="2.5" fill="#fff"/>`];
+    parts.push(seg([hip[0] + 0.4, hip[1]], sh, { op: 0.95 }));  // 躯干
+    for (const ph of [t, t + Math.PI]) {                        // 两腿相位差 π
+      const thigh = 42 * Math.sin(ph);                          // 大腿摆角
+      const bend = 18 + 34 * Math.max(0, -Math.sin(ph));        // 后摆相膝弯更大
+      const knee = pt(hip, 90 + thigh, 5.4);
+      const foot = pt(knee, 90 + thigh + bend, 5.2);
+      parts.push(seg(hip, knee, { op: 0.8 }), seg(knee, foot));
+    }
+    for (const ph of [t + Math.PI, t]) {                        // 手臂与对侧腿同相
+      const swing = 34 * Math.sin(ph);
+      const elbow = pt(sh, 90 + swing - 14, 4.2);               // 上臂略张
+      const hand = pt(elbow, 90 + swing + 26, 4.0);             // 前臂前摆
+      parts.push(seg(sh, elbow, { op: 0.65, w: 1.6 }), seg(elbow, hand, { op: 0.65, w: 1.6 }));
+    }
+    return `<g>${parts.join("")}</g>`;
+  }
+
+  function runnerRender() {
+    if (runner.svg) runner.svg.innerHTML = runnerSVG(runner.frame);
+  }
+
+  function runnerTick(ts) {
+    if (!runner.raf) return;
+    const dt = runner.last ? Math.min(64, ts - runner.last) : 16;
+    runner.last = ts;
+    if (runner.rate > 0.05) {
+      runner.progress += dt / 1000 * runner.rate;
+      const f = Math.floor(runner.progress) % 8;
+      if (f !== runner.frame) { runner.frame = f; runnerRender(); }
+      runner.rate = Math.max(0, runner.rate - dt / 1000 * 10);  // 减速度 10 帧/秒²,松手跑几步自然停
+    } else {
+      runner.raf = 0; runner.last = 0;
+      return;
+    }
+    runner.raf = requestAnimationFrame(runnerTick);
+  }
+
+  function runnerKick(speed) {
+    runner.rate = Math.max(runner.rate, speed || 14);
+    if (!runner.raf) { runner.last = 0; runner.raf = requestAnimationFrame(runnerTick); }
+  }
+
+  function runnerStop() {
+    if (runner.raf) cancelAnimationFrame(runner.raf);
+    runner.raf = 0; runner.rate = 0; runner.last = 0;
+  }
+
+  // 辐射特效:换档确认时从滑块发射一圈涟漪
+  function rippleAt() {
+    if (!runner.el || !runner.el.parentElement) return;
+    const r = document.createElement("div");
+    Object.assign(r.style, {
+      position: "absolute", left: runner.el.style.left, top: "50%",
+      width: "26px", height: "26px", borderRadius: "50%",
+      border: "1.5px solid " + FILL, pointerEvents: "none",
+      animation: "zsliderRipple .5s ease-out forwards",
+    });
+    runner.el.parentElement.appendChild(r);
+    setTimeout(() => r.remove(), 520);
+  }
+
   function setFill(idx, n) {
     const pct = n > 1 ? (idx / (n - 1)) * 100 : 0;
     fillEl.style.width = pct + "%";
-    if (glowEl) glowEl.style.left = pct + "%";   // 光点独立于裁剪层,过冲时光晕悬浮在端点外
+    if (runner.el) runner.el.style.left = pct + "%";   // 滑块独立于裁剪层,过冲时小人悬浮在端点外
     dots.forEach((d, i) => {
       d.style.background = i <= idx ? FILL : DOT_IDLE;
       d.style.width = d.style.height = (i === idx ? 9 : 6) + "px";
@@ -232,6 +313,7 @@
     if (!panel) return;
     const p = panel;
     panel = null;
+    runnerStop();   // 面板关闭即停小人动画(rAF 引用旧节点无意义)
     document.removeEventListener("pointerdown", onDocDown, true);
     document.removeEventListener("keydown", onDocKey, true);
     if (animate) {
@@ -315,18 +397,23 @@
     });
     clip.appendChild(fillEl);
     track.appendChild(clip);
-    // 末端光点:独立于裁剪层悬浮,过冲时光晕悬在端点外,视觉更活
-    glowEl = document.createElement("div");
-    Object.assign(glowEl.style, {
+    // 滑块按钮:八帧奔跑小人(致敬 Codex/dsh-reasoning-effort),独立于裁剪层悬浮。
+    // 静止停在站立帧;拖动/换档时按速度播放跑步循环,松手自然减速停下。
+    runner.el = document.createElement("div");
+    Object.assign(runner.el.style, {
       position: "absolute", left: "0%", top: "50%",
-      transform: "translate(-50%,-50%)",
-      width: "8px", height: "8px", borderRadius: "50%",
-      background: "rgba(255,255,255,0.92)",
-      boxShadow: "0 0 8px 2px rgba(74,222,128,0.55)",
+      transform: "translate(-50%,-58%)",
+      width: "20px", height: "20px",
       pointerEvents: "none",
       transition: `left .45s ${EASE}`,
+      filter: "drop-shadow(0 0 4px rgba(74,222,128,0.45))",
     });
-    track.appendChild(glowEl);
+    runner.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    runner.svg.setAttribute("viewBox", "0 0 24 24");
+    Object.assign(runner.svg.style, { width: "100%", height: "100%", display: "block" });
+    runner.el.appendChild(runner.svg);
+    runnerRender();
+    track.appendChild(runner.el);
     p.appendChild(track);
 
     // 刻度点:级联弹入(stagger)+ 尺寸/颜色平滑过渡;挂 track 层避免被裁剪层裁掉
@@ -372,20 +459,29 @@
       setFill(idx, state.levels.length);
       labelEl.textContent = state.levels[idx] ?? "";
     };
+    let lastMoveX = null;
     track.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       state.drag = true;
+      lastMoveX = e.clientX;
       fillEl.style.transition = "none";   // 拖拽跟手,不用弹性
+      runnerKick(12);
       try { track.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       preview(idxFromEvent(e));
     });
     track.addEventListener("pointermove", (e) => {
-      if (state.drag) preview(idxFromEvent(e));
+      if (!state.drag) return;
+      preview(idxFromEvent(e));
+      // 拖得越快小人跑得越快(速度联动;衰减由引擎负责,持续移动会不断补kick)
+      const dx = lastMoveX == null ? 0 : Math.abs(e.clientX - lastMoveX);
+      lastMoveX = e.clientX;
+      if (dx > 0) runnerKick(8 + Math.min(34, dx * 2.2));
     });
     const finish = (e) => {
       if (!state.drag) return;
       state.drag = false;
-      fillEl.style.transition = `width .45s ${EASE}`;   // 松手回弹
+      lastMoveX = null;
+      fillEl.style.transition = `width .45s ${EASE}`;   // 松手回弹;小人自然减速停下
       try { track.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       const idx = idxFromEvent(e);
       const value = state.levels[idx];
@@ -399,11 +495,12 @@
     track.addEventListener("pointerup", finish);
     track.addEventListener("pointercancel", (e) => {
       state.drag = false;
+      lastMoveX = null;
       fillEl.style.transition = `width .45s ${EASE}`;
       sync();
     });
 
-    // ←/→ 微调(面板聚焦时)
+    // ←/→ 微调(面板聚焦时;小人随按键跑动)
     p.addEventListener("keydown", (e) => {
       const n = state.levels.length;
       if (!n) return;
@@ -412,6 +509,7 @@
       else if (e.key === "ArrowLeft") idx = Math.max(0, idx - 1);
       else return;
       e.preventDefault();
+      runnerKick(13);
       const value = state.levels[idx];
       setFill(idx, n);
       labelEl.textContent = value;
@@ -460,7 +558,9 @@
         entryName.textContent = p.cur;
         entryName.style.color = idx >= 0 ? "" : "rgba(233,99,99,0.9)";   // 未知档位标红提示
         setMini(idx >= 0 ? idx : 0, p.levels.length);
-        // 面板打开时档名脉冲一下,呼应填充弹性回弹
+        // 换档确认:小人起跑 + 滑块处发射涟漪 + 档名脉冲,呼应填充弹性回弹
+        if (state.cur) runnerKick(14);
+        if (panel) rippleAt();
         if (panel && labelEl) {
           labelEl.style.animation = "none";
           void labelEl.offsetHeight;   // 强制回流重触发动画
