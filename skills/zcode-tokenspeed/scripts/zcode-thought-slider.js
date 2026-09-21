@@ -31,9 +31,6 @@
   window.__zslider = true;
   const MARK = "data-zslider";
   const FILL = "#4ade80";           // 兜底色(实际按档位着色,见 effortColor)
-  const TRACK = (typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: light)").matches)
-    ? "rgba(30,64,175,0.22)"        // 浅色主题:蓝灰轨道
-    : "rgba(6,8,16,0.55)";          // 深色主题:近黑轨道(dsh 规格)
   const DOT_IDLE = "rgba(127,127,127,0.55)";
   const ACCENT = "var(--color-warning, #e0983a)";
 
@@ -51,6 +48,18 @@
 @keyframes zsliderPulse{0%{transform:scale(1)}40%{transform:scale(1.28)}100%{transform:scale(1)}}
 @keyframes zsliderGlow{0%,100%{box-shadow:0 0 6px 1px rgba(125,211,252,.4)}50%{box-shadow:0 0 14px 3px rgba(125,211,252,.75)}}
 @keyframes zsliderRipple{from{opacity:.75;transform:translate(-50%,-50%) scale(.4)}to{opacity:0;transform:translate(-50%,-50%) scale(2.4)}}
+/* ---- dsh-reasoning-effort 视觉规格：渐变轨道 / 拖尾光斑 / 拖拽增辉 / max 呼吸 ---- */
+.zslider-panel{border:1px solid rgba(127,127,127,.22)!important;border-radius:14px!important;box-shadow:0 14px 42px rgba(0,0,0,.38),0 3px 10px rgba(0,0,0,.16)!important;backdrop-filter:blur(8px)}
+.zslider-rail{background:linear-gradient(100deg,#03040a 0%,#071126 22%,#101d4c 45%,#302262 70%,#5d35a0 100%)!important;box-shadow:inset 0 1px 0 rgba(189,199,255,.15),inset 0 -1px 0 rgba(0,0,0,.55),0 3px 10px rgba(12,17,55,.34)!important}
+.zslider-flare{position:absolute;top:50%;left:var(--zp,0%);width:64px;height:40px;border-radius:50%;transform:translate(-100%,-50%);background:radial-gradient(ellipse at 100% 50%,rgba(255,255,255,.95) 0 4%,rgba(188,189,255,.8) 11%,rgba(106,87,255,.5) 28%,rgba(105,31,255,.2) 49%,transparent 74%);filter:blur(2px) saturate(1.25);mix-blend-mode:screen;transition:left 70ms linear,filter 140ms ease;pointer-events:none}
+.zslider-track.is-dragging .zslider-flare{filter:blur(1.5px) saturate(1.6) brightness(1.42);transition:none}
+.zslider-track.is-dragging .zslider-fill{filter:saturate(1.45) brightness(1.28)}
+.zslider-track[data-top] .zslider-rail{animation:zsliderBreathe 1.9s ease-in-out infinite}
+@keyframes zsliderBreathe{0%,100%{filter:brightness(1) saturate(1)}50%{filter:brightness(1.3) saturate(1.2)}}
+@media (prefers-color-scheme: light){
+  .zslider-rail{background:linear-gradient(90deg,#eef3ff 0%,#dfe9ff 100%)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.9),inset 0 0 0 1px rgba(77,111,255,.14),0 2px 8px rgba(31,58,147,.12)!important}
+  .zslider-flare{background:radial-gradient(ellipse at 100% 50%,rgba(255,255,255,.9) 0 5%,rgba(141,166,255,.65) 16%,rgba(91,120,255,.4) 36%,rgba(91,63,255,.16) 55%,transparent 74%)}
+}
 `;
     document.head.appendChild(st);
   }
@@ -246,6 +255,7 @@
   let track = null;
   let rail = null;
   let fillEl = null;
+  let flareEl = null;
   let dots = [];
   let labelEl = null;
   let state = { levels: [], cur: "", key: "", drag: false, effortColor: "#4d9dff" };
@@ -345,14 +355,21 @@
     const pct = n > 1 ? (idx / (n - 1)) * 100 : 0;
     fillEl.style.width = pct + "%";
     if (runner.el) runner.el.style.left = pct + "%";   // 滑块独立于裁剪层,过冲时小人悬浮在端点外
+    // 光斑锚点与 max 档呼吸(dsh 规格):--zp 驱动 .zslider-flare,data-top 触发轨道呼吸
+    track.style.setProperty("--zp", pct + "%");
+    if (idx >= 0 && n > 1 && idx === n - 1) track.setAttribute("data-top", "1");
+    else track.removeAttribute("data-top");
     const ec = effortColor(idx, n);
     state.effortColor = ec.color;
     fillEl.style.background = ec.color;
     fillEl.style.animation = ec.pulse ? "zsliderGlow 1.6s ease-in-out infinite" : "none";
     if (runner.el) runner.el.style.filter = `drop-shadow(${ec.glow})`;
     dots.forEach((d, i) => {
-      d.style.background = i <= idx ? ec.color : DOT_IDLE;
+      const active = i <= idx;
+      d.style.background = active ? ec.color : DOT_IDLE;
       d.style.width = d.style.height = (i === idx ? 9 : 6) + "px";
+      d.style.boxShadow = active ? `0 0 6px ${ec.color}66` : "none";
+      d.style.border = active ? "none" : "1px solid rgba(127,127,127,.35)";
     });
   }
 
@@ -387,15 +404,13 @@
     closePanel(false);
     const p = document.createElement("div");
     p.setAttribute(MARK + "-panel", "1");
+    p.className = "zslider-panel";
     p.tabIndex = -1;
     Object.assign(p.style, {
       position: "fixed", zIndex: "2147483000",
       width: "236px", padding: "10px 12px 12px",
-      borderRadius: "12px",
       background: "var(--color-background, #1e1e1e)",
       color: "var(--color-foreground, #e8e8e8)",
-      border: "1px solid rgba(127,127,127,0.28)",
-      boxShadow: "0 10px 32px rgba(0,0,0,0.38)",
       transformOrigin: "bottom left",
       animation: "none",   // 先无动画完成定位测量(scale 状态会污染 getBoundingClientRect),定位后再启动
       userSelect: "none",
@@ -418,31 +433,38 @@
 
     // 滑条行
     track = document.createElement("div");
+    track.className = "zslider-track";
     Object.assign(track.style, {
       position: "relative", height: "26px",
       cursor: "pointer", touchAction: "none",
     });
-    // 轨道底
+    // 轨道底(dsh 规格:深蓝→紫渐变,浅色主题由 CSS 媒体查询切换)
     rail = document.createElement("div");
+    rail.className = "zslider-rail";
     Object.assign(rail.style, {
-      position: "absolute", left: "0", right: "0", top: "11px", height: "4px",
-      borderRadius: "2px", background: TRACK,
+      position: "absolute", left: "0", right: "0", top: "10px", height: "6px",
+      borderRadius: "3px",
     });
     track.appendChild(rail);
     // 填充条裁剪层:弹性过冲曲线会让 width 短暂超过 100%,必须裁住否则溢出轨道
     const clip = document.createElement("div");
     Object.assign(clip.style, {
-      position: "absolute", left: "0", right: "0", top: "11px", height: "4px",
-      borderRadius: "2px", overflow: "hidden",
+      position: "absolute", left: "0", right: "0", top: "10px", height: "6px",
+      borderRadius: "3px", overflow: "hidden",
     });
     fillEl = document.createElement("div");
+    fillEl.className = "zslider-fill";
     Object.assign(fillEl.style, {
       position: "absolute", left: "0", top: "0", height: "100%",
-      borderRadius: "2px", background: FILL, width: "0",
+      borderRadius: "3px", background: FILL, width: "0",
       // 弹性扫入:打开面板/换档时从旧值弹到新值;拖拽中临时禁用(跟手)
       transition: `width .45s ${EASE}`,
     });
     clip.appendChild(fillEl);
+    // 拖尾光斑(dsh 规格):纯白核心向蓝紫扩散,贴着滑块左侧,screen 混合
+    flareEl = document.createElement("div");
+    flareEl.className = "zslider-flare";
+    clip.appendChild(flareEl);
     track.appendChild(clip);
     // 滑块按钮:八帧奔跑小人(致敬 Codex/dsh-reasoning-effort),独立于裁剪层悬浮。
     // 静止停在站立帧;拖动/换档时按速度播放跑步循环,松手自然减速停下。
@@ -522,6 +544,7 @@
       e.preventDefault();
       state.drag = true;
       lastMoveX = e.clientX;
+      track.classList.add("is-dragging");   // 拖拽增辉:光斑/填充提亮,滑块放大
       fillEl.style.transition = "none";   // 拖拽跟手,不用弹性
       if (runner.tail) runner.tail.style.opacity = ".55";
       try { track.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
@@ -536,6 +559,7 @@
       if (!state.drag) return;
       state.drag = false;
       lastMoveX = null;
+      track.classList.remove("is-dragging");
       if (runner.tail) runner.tail.style.opacity = "0";
       fillEl.style.transition = `width .45s ${EASE}`;   // 松手回弹,小人回到 720ms 待机循环
       try { track.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
@@ -552,6 +576,7 @@
     track.addEventListener("pointercancel", (e) => {
       state.drag = false;
       lastMoveX = null;
+      track.classList.remove("is-dragging");
       if (runner.tail) runner.tail.style.opacity = "0";
       fillEl.style.transition = `width .45s ${EASE}`;
       sync();

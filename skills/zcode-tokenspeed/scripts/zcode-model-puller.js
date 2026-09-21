@@ -7,6 +7,8 @@
  * ZCode 自定义模型供应商 - 自动拉取模型列表插件 (开源旗舰版)
  * 1. 极致现代视觉：精致高级渐变质感按钮（自适应深浅主题、悬停微光与物理动效）
  * 2. 100% 精准识别：config 已有模型标注「已添加」并不勾选，新模型标注「新模型」并默认勾选（以 config.json 为唯一事实源）
+ * 2.1 确认写入：勾选的模型一律（重）写条目，不因 config 已存在而跳过——修复「界面删除后
+ *     弹窗仍标已添加、再次添加却写不进列表」的幽灵状态；同 baseURL 的多个供应商条目全部同步
  * 3. 完美交互：滚动位置丝毫不动，搜索就地过滤
  * 4. 自动原生刷新：保存后自动触发官方刷新与组件重新装载，新模型卡片秒级呈现
  * 5. 跨进程安全 IPC 桥梁：原生无 CORS 限制、极速安全持久化
@@ -744,14 +746,20 @@
         let targetPid = null;
         let p = null;
         let createdProvider = null;
+        const targets = [];
 
-        const cleanBase = (baseUrl || "").replace(/\/+$/, "");
+        // 与 getExistingModels 完全一致的规范化（去尾斜杠 + 去尾部 /v1）：
+        // 「已添加」判定和实际写入必须落在同一批供应商上，否则会出现
+        // 弹窗标已添加、确认后却写进另一个（或新建的）供应商的幽灵状态
+        const normBase = (u) => (u || "").replace(/\/+$/, "").replace(/\/v1$/, "");
+        const cleanBase = normBase(baseUrl);
         for (const [pid, pdata] of Object.entries(providers)) {
-          const curBase = (pdata.options?.baseURL || "").replace(/\/+$/, "");
-          if (curBase === cleanBase) {
-            targetPid = pid;
-            p = pdata;
-            break;
+          if (normBase(pdata.options?.baseURL) === cleanBase) {
+            targets.push(pdata);
+            if (!p) {
+              targetPid = pid;
+              p = pdata;
+            }
           }
         }
 
@@ -798,44 +806,61 @@
           console.log("[ZCode-Model-Puller] 供应商不存在，已自动创建:", createdProvider);
         }
 
-        p.models = p.models || {};
+        // 关键修复：勾选的模型一律重写条目，不再因 config 里已存在而跳过。
+        // 界面删除模型后 config 与界面状态可能不同步（config 里残留旧条目），
+        // 旧逻辑 continue 导致「再次添加」实际没写任何东西，列表永远刷不出来。
+        const targetList = targets.length ? targets : [p];
+        if (targets.length > 1) {
+          console.log(`[ZCode-Model-Puller] 检测到 ${targets.length} 个同 baseURL 供应商条目，全部同步写入`);
+        }
         let addedCount = 0;
-        for (const mid of toAdd) {
-          if (p.models[mid]) continue;
-          // 优先用 /v1/models 返回的真实元数据（context_length/max_output_tokens/
-          // supported_efforts/default_effort，workbuddy2api 等网关透出），缺失时退回保守模板
-          const m = (metas && metas[mid]) || {};
-          let efforts = Array.isArray(m.efforts) && m.efforts.length
-            ? m.efforts.map((x) => String(x).trim()).filter(Boolean)
-            : ["off", "low", "high", "max"];
-          if (!efforts.includes("off")) efforts = ["off", ...efforts];
-          // 3.14.x 原生档位机制：optionSpecs.reasoningLevel（values 末位即默认档），
-          // map 为 CEL 表达式，按档位生成 JSON 合并补丁直接打进请求体
-          const optMap = p.kind === "anthropic"
-            ? "reasoningLevel=='off' ? {'thinking':{'type':'disabled'}} : {'thinking':{'type':'adaptive'},'output_config':{'effort':reasoningLevel}}"
-            : "{'reasoning_effort':reasoningLevel}";
-          p.models[mid] = {
-            limit: {
-              context: m.context > 0 ? m.context : 1000000,
-              output: m.output > 0 ? m.output : 128000,
-            },
-            modalities: { input: ["text", "image"], output: ["text"] },
-            optionSpecs: { reasoningLevel: { values: efforts, map: optMap } },
-            zcode: { modalitiesConfigured: true, modified: true },
-          };
-          addedCount++;
+        let refreshedCount = 0;
+        for (const prov of targetList) {
+          prov.models = prov.models || {};
+          for (const mid of toAdd) {
+            const existed = !!prov.models[mid];
+            // 优先用 /v1/models 返回的真实元数据（context_length/max_output_tokens/
+            // supported_efforts/default_effort，workbuddy2api 等网关透出），缺失时退回保守模板
+            const m = (metas && metas[mid]) || {};
+            let efforts = Array.isArray(m.efforts) && m.efforts.length
+              ? m.efforts.map((x) => String(x).trim()).filter(Boolean)
+              : ["off", "low", "high", "max"];
+            if (!efforts.includes("off")) efforts = ["off", ...efforts];
+            // 3.14.x 原生档位机制：optionSpecs.reasoningLevel（values 末位即默认档），
+            // map 为 CEL 表达式，按档位生成 JSON 合并补丁直接打进请求体
+            const optMap = prov.kind === "anthropic"
+              ? "reasoningLevel=='off' ? {'thinking':{'type':'disabled'}} : {'thinking':{'type':'adaptive'},'output_config':{'effort':reasoningLevel}}"
+              : "{'reasoning_effort':reasoningLevel}";
+            prov.models[mid] = {
+              limit: {
+                context: m.context > 0 ? m.context : 1000000,
+                output: m.output > 0 ? m.output : 128000,
+              },
+              modalities: { input: ["text", "image"], output: ["text"] },
+              optionSpecs: { reasoningLevel: { values: efforts, map: optMap } },
+              zcode: { modalitiesConfigured: true, modified: true },
+            };
+            if (existed) refreshedCount++;
+            else addedCount++;
+          }
         }
 
-        console.log(`[ZCode-Model-Puller] 成功写入 ${addedCount} 个新模型到:`, p.name);
+        console.log(
+          `[ZCode-Model-Puller] 写入完成：新增 ${addedCount} 个，重写已存在 ${refreshedCount} 个 →`,
+          targetList.map((x) => x.name)
+        );
         const ok = await writeZCodeConfig(cfg);
         if (!ok) {
           throw new Error("写入配置文件失败");
         }
 
+        const summary = refreshedCount > 0
+          ? `新增 ${addedCount} 个、重写已存在 ${refreshedCount} 个（自带思考档位）`
+          : `成功添加 ${addedCount} 个模型（自带思考档位）`;
         showToast(
           createdProvider
-            ? `🎉 已创建供应商「${createdProvider.name}」（${createdProvider.kind}）并添加 ${toAdd.length} 个模型（自带 off/low/high/max 思考档位）；如设置页未刷新请重新打开`
-            : `🎉 成功添加 ${toAdd.length} 个模型（自带 off/low/high/max 思考档位）！已自动刷新列表`
+            ? `🎉 已创建供应商「${createdProvider.name}」（${createdProvider.kind}），${summary}；如设置页未刷新请重新打开`
+            : `🎉 ${summary}！已自动刷新列表`
         );
         closeModal();
 

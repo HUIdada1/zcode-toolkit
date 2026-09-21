@@ -3,7 +3,9 @@
 """
 ZCode 自定义供应商模型拉取（CLI 版，不动 app.asar）
 ====================================================
-从各自定义供应商的 /models 接口拉取模型列表，把新模型写入 ~/.zcode/v2/config.json。
+从各自定义供应商的 /models 接口拉取模型列表，把新模型写入 v2 配置（config.json +
+provider_config.json，后者是 3.14.x 界面模型列表的唯一事实源；根目录按
+~/.zcode/v2/setting.json 的 dataBaseDir 解析，与客户端 bootstrap 同逻辑）。
 已支持读取网关透出的每模型元数据（context_length / max_output_tokens / supported_efforts /
 default_effort，如 workbuddy2api），按模型写实 limit 与思考档位；元数据缺失时退回保守模板
 （1M/128k + off/high/max）。已有条目默认原样保留（含手改的配置）；--refresh 可按服务器
@@ -35,6 +37,24 @@ import urllib.request
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".zcode" / "v2" / "config.json"
+
+
+def resolve_v2_root() -> Path:
+    """解析 v2 配置根目录：~/.zcode/v2/setting.json 的 dataBaseDir 优先
+    （与 ZCode 客户端 bootstrap 同逻辑），未设置时回退 home 目录。"""
+    base = Path.home()
+    try:
+        s = json.loads((base / ".zcode" / "v2" / "setting.json").read_text(encoding="utf-8"))
+        dbd = s.get("dataBaseDir")
+        if isinstance(dbd, str) and dbd.strip():
+            base = Path(dbd.strip())
+    except Exception:
+        pass
+    return base / ".zcode" / "v2"
+
+
+V2_ROOT = resolve_v2_root()
+CONFIG_PATH = V2_ROOT / "config.json"
 
 FALLBACK_EFFORTS = ["off", "low", "high", "max"]
 FALLBACK_LIMIT = {"context": 1000000, "output": 128000}
@@ -235,6 +255,84 @@ def sync(providers, with_reasoning: bool, dry_run: bool, refresh: bool) -> int:
     return total_added
 
 
+def sync_provider_config(cfg: dict) -> None:
+    """把 config.json 的 provider 段同步进新版 provider_config.json——3.14.x 起
+    界面模型列表以它为唯一事实源（providerRules.personalModelIds/modelOrder +
+    modelConfigRules.providerModelRules），只写 config.json 界面永远看不到。"""
+    pc_path = V2_ROOT / "provider_config.json"
+    try:
+        pc = json.loads(pc_path.read_text(encoding="utf-8"))
+        if not isinstance(pc, dict):
+            pc = {}
+    except Exception:
+        pc = {}
+    pc.setdefault("schemaVersion", 1)
+    conf = pc.setdefault("config", {})
+    rules = conf.setdefault("providerConfigRules", {}).setdefault("providerRules", [])
+    mrules = conf.setdefault("modelConfigRules", {}).setdefault("providerModelRules", [])
+
+    def kind_to_api(kind: str | None) -> str:
+        if kind == "anthropic":
+            return "anthropic-messages"
+        if kind == "openai":
+            return "openai-responses"
+        return "openai-chat-completions"
+
+    by_id = {r.get("providerId"): r for r in rules
+             if isinstance(r, dict) and r.get("providerId")}
+    for pid, pdata in (cfg.get("provider") or {}).items():
+        if not isinstance(pdata, dict) or pid.startswith("builtin:"):
+            continue
+        models = pdata.get("models") or {}
+        ids = list(models.keys())
+        opts = pdata.get("options") or {}
+        rule = by_id.get(pid)
+        if rule is None:  # 兼容 provider_config 与 config.json id 不一致：按 baseURL 兜底
+            bu = (opts.get("baseURL") or "").rstrip("/")
+            for r in rules:
+                u = ((r.get("config") or {}).get("api") or {}).get("baseUrl") or ""
+                if u.rstrip("/") == bu:
+                    rule = r
+                    break
+        if rule is None:
+            rule = {"providerId": pid, "providerName": pdata.get("name") or pid,
+                    "config": {"group": "standard-personal", "access": {"type": "api-key"},
+                               "api": {"type": kind_to_api(pdata.get("kind"))},
+                               "personalModelIds": [], "modelOrder": []}}
+            rules.append(rule)
+            by_id[pid] = rule
+        c = rule.setdefault("config", {})
+        c.setdefault("group", "standard-personal")
+        acc = c.setdefault("access", {"type": "api-key"})
+        if opts.get("apiKey"):
+            acc["apiKey"] = opts["apiKey"]
+        api = c.setdefault("api", {})
+        if opts.get("baseURL"):
+            api["baseUrl"] = opts["baseURL"]
+        if pdata.get("kind"):
+            api["type"] = kind_to_api(pdata["kind"])
+        c["personalModelIds"] = list(ids)
+        c["modelOrder"] = list(ids)
+        # 该供应商的模型规则：保留既有（界面手改的 contextWindow 等），缺失才补，
+        # 已删除模型的规则随之移除；其它供应商与 account 级规则原样不动
+        old_rules = {m.get("modelId"): m for m in mrules
+                     if isinstance(m, dict) and m.get("providerId") == pid}
+        mrules[:] = [m for m in mrules
+                     if not (isinstance(m, dict) and m.get("providerId") == pid)]
+        for mid in ids:
+            if mid in old_rules:
+                mrules.append(old_rules[mid])
+            else:
+                ctx = ((models.get(mid) or {}).get("limit") or {}).get("context") or 1000000
+                mrules.append({"modelId": mid, "providerId": pid,
+                               "config": {"properties": {"contextWindow": ctx}}})
+    try:
+        shutil.copy2(pc_path, pc_path.with_name(pc_path.name + ".puller-bak"))
+    except Exception:
+        pass
+    pc_path.write_text(json.dumps(pc, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="ZCode 自定义供应商模型拉取（CLI，不动 asar）")
     ap.add_argument("--all", action="store_true", help="同步全部自定义供应商")
@@ -301,7 +399,12 @@ def main() -> None:
         bak = CONFIG_PATH.with_name(f"config.json.bak.{int(time.time())}")
         shutil.copy2(CONFIG_PATH, bak)
         CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"\n🎉 已写入配置（新增 {total} 个模型，备份: {bak.name}）。")
+        try:
+            sync_provider_config(cfg)
+            pc_note = f"；已同步 provider_config.json（{V2_ROOT}）"
+        except Exception as e:
+            pc_note = f"；⚠️ provider_config.json 同步失败: {e}"
+        print(f"\n🎉 已写入配置（新增 {total} 个模型，备份: {bak.name}）{pc_note}。")
         print("    ZCode 运行中请在界面里切换一下页面刷新模型列表，或重启 ZCode。")
 
 

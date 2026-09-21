@@ -12,12 +12,14 @@ ZCode 桌面客户端的本地增强补丁插件:六个补丁覆盖模型思考�
 | 用量页去截断 | 趋势图 / 饼图全量展示,不再只画 Top 6 / Top 5 | `--usage-chart` |
 | 模型弹窗加宽 | 模型浮窗 192px → 320px,长模型名不再截断 | `--model-width` |
 | TPS 状态栏 | 输入框下方居中统计条:本轮指标 + 会话累计,右键可切位置 | `--tps-footer` |
-| 思考强度滑条 | 原生下拉替换为点击弹出的吸附拖拽条,拖完即时生效 | `--thought-slider` |
-| 模型拉取按钮 | 一键拉取 `/models`,已添加自动标注,勾选即写入 | `--model-puller` |
+| 思考强度滑条 | 原生下拉替换为点击弹出的吸附拖拽条,拖完即时生效;视觉规格对齐 [dsh-reasoning-effort](https://github.com/HanaAyane/dsh-reasoning-effort) | `--thought-slider` |
+| 模型拉取按钮 | 一键拉取 `/models`,已添加自动标注,勾选即写入;3.14.x 起同步 `provider_config.json` 新 schema,删除后可再次添加 | `--model-puller` |
 
 **TPS 状态栏**(`--tps-footer`)——`● 32 tok/s · out 1.7k │ 第 8 轮 │ 输入 45.2k · 命中 38.1k · 平均命中 84% · 累出 12.3k`:左组本轮即时指标(首 token / tok/s / out),右组会话累计(轮数 / 累计输入 / 累计命中与平均命中率 / 累计输出),组间竖线分隔;流式中实时刷新,空会话空态常驻,右键可切「输入框工具栏 / 会话顶部 sticky」。
 
-**思考强度滑条**(`--thought-slider`)——工具栏常驻「思考 · 档名」入口(迷你电量条),点击弹出吸附拖拽条:八帧奔跑小人滑块(拖得越快跑得越快,松手减速停下)、换档涟漪、填充弹性扫入、刻度级联弹入;档位取自模型实际配置(配几档吸几档),写档走原生链路,与原生状态双向同步,会话内即时生效。
+**思考强度滑条**(`--thought-slider`)——工具栏常驻「思考 · 档名」入口(迷你电量条),点击弹出吸附拖拽条:八帧奔跑小人滑块(拖得越快跑得越快,松手减速停下)、换档涟漪、填充弹性扫入、刻度级联弹入;视觉规格对齐 [HanaAyane/dsh-reasoning-effort](https://github.com/HanaAyane/dsh-reasoning-effort):深蓝→紫渐变轨道、滑块左侧拖尾光斑、拖拽增辉、max 档轨道呼吸泛光,深浅主题各自适配;档位取自模型实际配置(配几档吸几档),写档走原生链路,与原生状态双向同步,会话内即时生效。
+
+**模型拉取按钮**(`--model-puller`)——3.14.x 的界面模型列表以 `<dataBaseDir>/.zcode/v2/provider_config.json` 为唯一事实源(`dataBaseDir` 从 `~/.zcode/v2/setting.json` 解析,数据目录迁移到 F 盘等场景也能正确定位),本补丁读写时自动合并/回写新 schema 的 `personalModelIds`/`modelOrder` 与模型规则,同时保持旧 `config.json` 元数据一致;界面删除模型后再次拉取可正常重加,不再出现「已添加却写不进列表」。
 
 每个补丁都支持 `--check`(只读查状态)与 `--revert`(精确还原),互不干扰、可单独装卸。
 
@@ -66,7 +68,7 @@ skills/zcode-tokenspeed/scripts/
   zcode-model-puller.js                      模型拉取按钮前端脚本
   sync.py                                    开关同步(SessionStart hook 调用)
   apply_after_exit.py                        退出后看护:等 ZCode 退出 → 应用重打包级补丁
-  model_pull.py                              CLI 拉模型:不动 asar,直接同步 config.json
+  model_pull.py                              CLI 拉模型:不动 asar,直接同步 config.json + provider_config.json
   probe_max_tokens.py                        探测网关真实输出上限(识别「静默钳制」)
   tap_proxy.py                               请求捕获代理:验证思考参数是否真发出
   restore_clean.py                           紧急整包还原(客户端异常时无需重装)
@@ -82,7 +84,7 @@ commands/                                    /zcode-patch-status / apply / rever
 | macOS | ✅ 逻辑支持 | 修改 `.app` 会破坏签名,启动异常时重新 ad-hoc 签名即可 |
 | Linux | ✅ 逻辑支持 | 探测 `/opt`、`/usr/share` |
 
-对未知版本 / 未知结构,脚本一律拒绝盲改并报告原因,不会写坏文件。
+对未知版本 / 未知结构,脚本一律拒绝盲改并报告原因,不会写坏文件。开发与实测基于 **ZCode 3.11.2 / 3.14.1(Windows)**;3.14.x 起界面供应商列表由 `<dataBaseDir>/.zcode/v2/provider_config.json` 驱动,模型拉取补丁与 CLI 已同步适配,旧版客户端不受影响。
 
 ## License
 

@@ -773,28 +773,114 @@ def _puller_main_state(blob: bytes | None):
 
 def _puller_main_injection(ipc_alias: str) -> bytes:
     """在 ipcMain 别名的 SaveMcpToUserDirectory 注册语句前插入 3 个 handler。
-    写 config 前先落一份 config.json.puller-bak；动态 import 保持与原包一致。"""
+    3.14.x 起界面供应商列表真正读写 <dataBaseDir>/.zcode/v2/provider_config.json
+    （schemaVersion 1：providerRules.personalModelIds/modelOrder + providerModelRules），
+    config.json 仅存模型元数据；dataBaseDir 从 ~/.zcode/v2/setting.json 读出（与应用
+    bootstrap 同逻辑）。故：读时把 provider_config 合并成旧格式视图（personalModelIds
+    为唯一事实源），写时同时回写 provider_config 与 config.json。"""
     h = ipc_alias
-    read_h = (
-        f'{h}.handle("zcode:read-model-config",async()=>{{'
-        'try{let{default:e}=await import("node:fs"),{default:t}=await import("node:path"),'
-        '{default:n}=await import("node:os");'
-        'let r=t.join(n.homedir(),".zcode","v2","config.json");'
-        'return{success:!0,data:JSON.parse(e.readFileSync(r,"utf-8"))}}'
-        'catch(e){return{success:!1,error:String(e)}}});\n'
-    )
-    write_h = (
-        f'{h}.handle("zcode:write-model-config",async(e,t)=>{{'
-        'try{'
-        'if(typeof t!="object"||t===null)throw new Error("invalid config payload");'
-        'let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),'
-        '{default:i}=await import("node:os");'
-        'let o=r.join(i.homedir(),".zcode","v2","config.json");'
-        'try{n.writeFileSync(o+".puller-bak",n.readFileSync(o,"utf-8"))}catch(a){}'
-        'n.writeFileSync(o,JSON.stringify(t,null,2),"utf-8");'
-        'return{success:!0}}'
-        'catch(n){return{success:!1,error:String(n)}}});\n'
-    )
+    read_h = '''
+__H__.handle("zcode:read-model-config",async()=>{
+try{
+let{default:e}=await import("node:fs"),{default:t}=await import("node:path"),{default:n}=await import("node:os");
+let base=n.homedir();
+try{let s=JSON.parse(e.readFileSync(t.join(base,".zcode","v2","setting.json"),"utf-8"));
+if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
+let root=t.join(base,".zcode","v2");
+let cfg={provider:{}};
+try{let d=JSON.parse(e.readFileSync(t.join(root,"config.json"),"utf-8"));
+if(d&&typeof d=="object"&&!Array.isArray(d))cfg=d}catch(_){}
+if(!cfg.provider||typeof cfg.provider!="object"||Array.isArray(cfg.provider))cfg.provider={};
+let legacy={};
+try{legacy=JSON.parse(e.readFileSync(t.join(root,"provider_config.json"),"utf-8"))}catch(_){}
+let rules=(legacy&&legacy.config&&legacy.config.providerConfigRules&&legacy.config.providerConfigRules.providerRules)||[];
+let kt=(y)=>/anthropic/i.test(String(y))?"anthropic":(/responses/i.test(String(y))?"openai":"openai-compatible");
+for(let rule of rules){
+let pid=rule&&rule.providerId;
+if(!pid)continue;
+let c=rule.config||{},api=c.api||{},acc=c.access||{};
+let old=cfg.provider[pid]||{};
+let models={};
+let ids=Array.isArray(c.personalModelIds)?c.personalModelIds:[];
+for(let id0 of ids){
+if(typeof id0!="string")continue;
+let id=id0.trim();
+if(!id)continue;
+models[id]=(old.models&&old.models[id])||{limit:{context:1000000,output:128000},modalities:{input:["text","image"],output:["text"]},zcode:{modalitiesConfigured:!0,modified:!0}}
+}
+let opts=Object.assign({},old.options||{});
+if(api.baseUrl)opts.baseURL=api.baseUrl;
+if(acc.apiKey)opts.apiKey=acc.apiKey;
+cfg.provider[pid]={name:rule.providerName||old.name||pid,kind:old.kind||kt(api.type||""),source:"custom",options:opts,models}
+}
+return{success:!0,data:cfg}
+}catch(e){return{success:!1,error:String(e)}}});
+'''.replace("__H__", h)
+    write_h = '''
+__H__.handle("zcode:write-model-config",async(e,t)=>{
+try{
+if(typeof t!="object"||t===null)throw new Error("invalid config payload");
+let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os");
+let base=i.homedir();
+try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
+if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
+let root=r.join(base,".zcode","v2");
+let o=r.join(root,"config.json");
+try{n.writeFileSync(o+".puller-bak",n.readFileSync(o,"utf-8"))}catch(a){}
+n.writeFileSync(o,JSON.stringify(t,null,2),"utf-8");
+try{
+let pcPath=r.join(root,"provider_config.json");
+let pc={};
+try{pc=JSON.parse(n.readFileSync(pcPath,"utf-8"))}catch(_){}
+if(!pc||typeof pc!="object"||Array.isArray(pc))pc={schemaVersion:1,config:{}};
+pc.schemaVersion=pc.schemaVersion||1;
+pc.config=pc.config||{};
+let pcr=pc.config.providerConfigRules=pc.config.providerConfigRules||{};
+let rules=Array.isArray(pcr.providerRules)?pcr.providerRules:(pcr.providerRules=[]);
+let mcr=pc.config.modelConfigRules=pc.config.modelConfigRules||{};
+let mrules=Array.isArray(mcr.providerModelRules)?mcr.providerModelRules:(mcr.providerModelRules=[]);
+let byId={};
+for(let rule of rules){if(rule&&rule.providerId)byId[rule.providerId]=rule}
+let kt=(y)=>/anthropic/i.test(String(y))?"anthropic-messages":(/responses/i.test(String(y))?"openai-responses":"openai-chat-completions");
+for(let ent0 of Object.entries(t.provider||{})){
+let pid=ent0[0],pdata=ent0[1];
+if(!pdata||typeof pdata!="object")continue;
+let models=pdata.models||{};
+let ids=Object.keys(models);
+let rule=byId[pid];
+if(!rule){
+let bu=String((pdata.options&&pdata.options.baseURL)||"").replace(/\\/+$/,"");
+if(bu){for(let r2 of rules){let u=(r2&&r2.config&&r2.config.api&&r2.config.api.baseUrl)||"";
+if(u.replace(/\\/+$/,"")===bu){rule=r2;break}}}}
+if(!rule){rule={providerId:pid,providerName:pdata.name||pid,config:{group:"standard-personal",access:{type:"api-key"},api:{type:kt(pdata.kind||"")},personalModelIds:[],modelOrder:[]}};rules.push(rule);byId[pid]=rule}
+let c=rule.config=rule.config||{};
+c.group=c.group||"standard-personal";
+c.access=c.access||{type:"api-key"};
+if(pdata.options&&pdata.options.apiKey)c.access.apiKey=pdata.options.apiKey;
+c.api=c.api||{};
+if(pdata.options&&pdata.options.baseURL)c.api.baseUrl=pdata.options.baseURL;
+if(pdata.kind)c.api.type=kt(pdata.kind);
+c.personalModelIds=ids.slice();
+c.modelOrder=ids.slice();
+let oldRules={},keep=[];
+for(let m of mrules){
+if(m&&m.providerId===pid){oldRules[m.modelId]=m;continue}
+keep.push(m)
+}
+for(let mid of ids){
+if(oldRules[mid]){keep.push(oldRules[mid]);continue}
+let ent=models[mid]||{};
+keep.push({modelId:mid,providerId:pid,config:{properties:{contextWindow:(ent.limit&&ent.limit.context)||1000000}}})
+}
+mrules.length=0;
+for(let m of keep)mrules.push(m)
+}
+try{n.writeFileSync(pcPath+".puller-bak",n.readFileSync(pcPath,"utf-8"))}catch(a2){}
+n.writeFileSync(pcPath,JSON.stringify(pc,null,2),"utf-8");
+}catch(syncErr){return{success:!0,warn:"config.json written; provider_config.json sync failed: "+String(syncErr)}}
+return{success:!0}}
+catch(n){return{success:!1,error:String(n)}}});
+'''.replace("__H__", h)
     fetch_h = (
         f'{h}.handle("zcode:fetch-models-from-url",async(e,t)=>{{'
         'try{let{default:ht}=await import("node:https"),{default:hh}=await import("node:http");'
