@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ZCode 自定义供应商模型拉取（CLI 版，不动 app.asar）
+====================================================
+从各自定义供应商的 /models 接口拉取模型列表，把新模型写入 ~/.zcode/v2/config.json。
+已支持读取网关透出的每模型元数据（context_length / max_output_tokens / supported_efforts /
+default_effort，如 workbuddy2api），按模型写实 limit 与思考档位；元数据缺失时退回保守模板
+（1M/128k + off/high/max）。已有条目默认原样保留（含手改的配置）；--refresh 可按服务器
+元数据刷新已有条目的 limit 与思考档位。
+
+逻辑移植自 https://github.com/HHQ-666/zcode-model-puller (MIT, (c) HHQ-666) 的
+zcode_sync.py，改动：跨平台路径、非交互参数、元数据感知模板、--refresh、dry-run、写前备份。
+
+用法：
+  python model_pull.py                  # 交互式选择供应商
+  python model_pull.py --all            # 同步全部自定义供应商
+  python model_pull.py --provider deep  # 按名称/ID 子串匹配供应商
+  python model_pull.py --all --dry-run  # 只看会新增什么，不写配置
+  python model_pull.py --all --refresh  # 刷新已有条目的 limit/思考档位（按服务器元数据）
+  python model_pull.py --all --no-reasoning   # 新模型不带思考档位
+  python model_pull.py --test https://api.example.com/v1 [KEY]  # 只测连通并看元数据
+
+注意：ZCode 运行中写 config.json 存在被客户端回写覆盖的竞态，建议完全退出后执行；
+注入版（zcode_patcher.py --model-puller）在界面内写入并自动触发刷新，无此问题。
+"""
+
+import argparse
+import json
+import shutil
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+CONFIG_PATH = Path.home() / ".zcode" / "v2" / "config.json"
+
+FALLBACK_EFFORTS = ["off", "low", "high", "max"]
+FALLBACK_LIMIT = {"context": 1000000, "output": 128000}
+
+# 3.14.x 原生档位机制：optionSpecs.reasoningLevel.map 为 CEL 表达式，
+# 按档位生成 JSON 合并补丁，由内核 createModelOptionMapFetch 直接打进请求体
+MAP_OPENAI = "{'reasoning_effort':reasoningLevel}"
+MAP_ANTHROPIC = ("reasoningLevel=='off' ? {'thinking':{'type':'disabled'}} : "
+                 "{'thinking':{'type':'adaptive'},'output_config':{'effort':reasoningLevel}}")
+
+
+def build_option_specs(kind: str | None, values: list[str]) -> dict:
+    m = MAP_ANTHROPIC if kind == "anthropic" else MAP_OPENAI
+    return {"reasoningLevel": {"values": values, "map": m}}
+
+
+def _parse_model_item(item) -> tuple[str | None, dict]:
+    """从 /models 条目提取 (id, 元数据)；字符串条目只有 id。"""
+    if isinstance(item, str):
+        s = item.strip()
+        return (s or None), {}
+    if not isinstance(item, dict):
+        return None, {}
+    mid = (item.get("id") or item.get("name") or "").strip() or None
+    if not mid:
+        return None, {}
+    top = item.get("top_provider") if isinstance(item.get("top_provider"), dict) else {}
+    meta = {
+        "context": int(item.get("context_length") or item.get("max_input_tokens") or 0),
+        "output": int(item.get("max_output_tokens") or item.get("max_completion_tokens")
+                      or top.get("max_completion_tokens") or 0),
+        "efforts": [str(x).strip() for x in (item.get("supported_efforts") or [])
+                    if isinstance(x, str) and x.strip()],
+        "default": item.get("default_effort") if isinstance(item.get("default_effort"), str) else None,
+    }
+    return mid, meta
+
+
+def build_efforts(meta: dict) -> list[str]:
+    efforts = list(meta.get("efforts") or []) or list(FALLBACK_EFFORTS)
+    if "off" not in efforts:
+        efforts = ["off"] + efforts
+    d = meta.get("default")
+    if d in efforts and d != efforts[-1]:   # 3.14.x 约定：values 末位即默认档
+        efforts.remove(d)
+        efforts.append(d)
+    return efforts
+
+
+def build_entry(meta: dict, kind: str | None = None, with_reasoning: bool = True) -> dict:
+    m = meta or {}
+    efforts = build_efforts(m)
+    tpl = {
+        "limit": {
+            "context": m.get("context") or FALLBACK_LIMIT["context"],
+            "output": m.get("output") or FALLBACK_LIMIT["output"],
+        },
+        "modalities": {"input": ["text", "image"], "output": ["text"]},
+        "zcode": {"modalitiesConfigured": True, "modified": True},
+    }
+    if with_reasoning:
+        tpl["optionSpecs"] = build_option_specs(kind, efforts)
+    return tpl
+
+
+def fetch_models_from_api(base_url: str, api_key: str = "", timeout: int = 10):
+    """请求供应商 /models 接口，返回 (ok, msg, ids, metas)。自动适配 OpenAI 兼容/OneAPI 等。"""
+    base_url = (base_url or "").strip().rstrip("/")
+    if not base_url:
+        return False, "Base URL 为空", [], {}
+
+    candidates = []
+    if base_url.endswith("/v1"):
+        candidates.append(f"{base_url}/models")
+        candidates.append(f"{base_url[:-3]}/models")
+    else:
+        candidates.append(f"{base_url}/v1/models")
+        candidates.append(f"{base_url}/models")
+    if "/api" in base_url and not base_url.endswith("/models"):
+        candidates.append(f"{base_url}/v1/models")
+
+    headers = {"User-Agent": "ZCode", "Accept": "application/json"}
+    if api_key:
+        api_key = api_key.strip()
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["x-api-key"] = api_key
+
+    last_error = ""
+    for url in candidates:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if not (200 <= resp.status < 300):
+                    continue
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            last_error = f"HTTP {e.code}: {e.reason}"
+            continue
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+        models_raw = []
+        if isinstance(data, list):
+            models_raw = data
+        elif isinstance(data, dict):
+            if isinstance(data.get("data"), list):
+                models_raw = data["data"]
+            elif isinstance(data.get("models"), list):
+                models_raw = data["models"]
+
+        ids, metas = [], {}
+        for item in models_raw:
+            mid, meta = _parse_model_item(item)
+            if mid and mid not in metas:
+                metas[mid] = meta
+                ids.append(mid)
+        if ids:
+            ids.sort()
+            return True, f"成功从 {url} 获取", ids, metas
+
+    return False, f"拉取失败: {last_error or '未能解析到有效模型列表'}", [], {}
+
+
+def list_custom_providers(config_data):
+    providers = config_data.get("provider", {})
+    return [(pid, pdata) for pid, pdata in providers.items()
+            if not pid.startswith("builtin:")
+            and pdata.get("source") in (None, "custom", "user")]
+
+
+def refresh_entry(ent: dict, meta: dict, kind: str | None = None) -> list[str]:
+    """按服务器元数据就地刷新单条已有模型（limit + 档位），返回变更描述。
+    旧格式 reasoning.variants 顺手迁移为 3.14.x 的 optionSpecs.reasoningLevel。"""
+    changed = []
+    if meta.get("context") or meta.get("output"):
+        old_limit = ent.get("limit") or {}
+        new_limit = {"context": meta.get("context") or old_limit.get("context"),
+                     "output": meta.get("output") or old_limit.get("output")}
+        if old_limit != new_limit:
+            ent["limit"] = new_limit
+            changed.append(f"limit {new_limit['context']}/{new_limit['output']}")
+    old_reasoning = ent.pop("reasoning", None)
+    specs = ent.get("optionSpecs")
+    efforts = build_efforts(meta)
+    if old_reasoning is not None or not isinstance(specs, dict) or "reasoningLevel" not in specs:
+        if not isinstance(specs, dict):
+            specs = ent["optionSpecs"] = {}
+        cur = specs.get("reasoningLevel") or {}
+        specs["reasoningLevel"] = {"values": efforts, "map": cur.get("map") or build_option_specs(kind, efforts)["reasoningLevel"]["map"]}
+        changed.append(f"档位 {'/'.join(efforts)}" + ("（旧格式已迁移 optionSpecs）" if old_reasoning is not None else ""))
+    elif specs["reasoningLevel"].get("values") != efforts:
+        specs["reasoningLevel"]["values"] = efforts
+        changed.append(f"档位 {'/'.join(efforts)}")
+    return changed
+
+
+def sync(providers, with_reasoning: bool, dry_run: bool, refresh: bool) -> int:
+    total_added = 0
+    for pid, pdata in providers:
+        name = pdata.get("name", "未命名")
+        kind = pdata.get("kind")
+        opts = pdata.get("options") or {}
+        base_url = opts.get("baseURL") or ""
+        api_key = opts.get("apiKey") or ""
+
+        print(f"\n🔄 供应商「{name}」（{pid}）")
+        success, msg, fetched, metas = fetch_models_from_api(base_url, api_key)
+        if not success:
+            print(f"  ❌ {msg}")
+            continue
+
+        models = pdata.get("models") or {}
+        new_models = [m for m in fetched if m not in models]
+        print(f"  ✅ {msg}，共 {len(fetched)} 个模型，已存在 {len(fetched) - len(new_models)} 个，"
+              f"新增 {len(new_models)} 个" + ("，刷新元数据" if refresh else ""))
+        for m in new_models:
+            meta = metas.get(m) or {}
+            print(f"    + {m}  (ctx {meta.get('context') or '-'} / out {meta.get('output') or '-'}"
+                  f" / 档位 {'/'.join(meta.get('efforts') or []) or '-'}{(' 默认 ' + meta['default']) if meta.get('default') else ''})")
+        if not new_models and not refresh:
+            continue
+        total_added += len(new_models)
+
+        for m in new_models:
+            models[m] = build_entry(metas.get(m) or {}, kind, with_reasoning)
+        if refresh:
+            for mid, ent in models.items():
+                meta = metas.get(mid)
+                if not meta:
+                    continue
+                changed = refresh_entry(ent, meta, kind)
+                if changed:
+                    print(f"    {'[预览] ' if dry_run else '↻ '}{mid}: " + "；".join(changed))
+        if dry_run:
+            continue
+        pdata["models"] = models
+    return total_added
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="ZCode 自定义供应商模型拉取（CLI，不动 asar）")
+    ap.add_argument("--all", action="store_true", help="同步全部自定义供应商")
+    ap.add_argument("--provider", default=None, help="按名称/ID/baseURL 子串匹配供应商")
+    ap.add_argument("--dry-run", action="store_true", help="只显示会新增/刷新什么，不写配置")
+    ap.add_argument("--refresh", action="store_true",
+                    help="按服务器元数据刷新已有条目的 limit 与思考档位（其余键不动）")
+    ap.add_argument("--no-reasoning", action="store_true", help="新模型不配思考档位")
+    ap.add_argument("--test", nargs="+", metavar=("BASE_URL", "API_KEY"), help="只测试 URL/Key 连通与模型列表")
+    args = ap.parse_args()
+
+    if args.test:
+        url = args.test[0]
+        key = args.test[1] if len(args.test) > 1 else ""
+        ok, msg, models, metas = fetch_models_from_api(url, key)
+        print(("✅ " if ok else "❌ ") + msg)
+        if ok:
+            print(f"共 {len(models)} 个模型：")
+            for m in models:
+                meta = metas.get(m) or {}
+                print(f"  {m:35} ctx {meta.get('context') or '-':>8}  out {meta.get('output') or '-':>7}"
+                      f"  档位 {'/'.join(meta.get('efforts') or []) or '-'}"
+                      f"{(' 默认 ' + meta['default']) if meta.get('default') else ''}")
+        sys.exit(0 if ok else 1)
+
+    if not CONFIG_PATH.is_file():
+        raise SystemExit(f"[!] 找不到配置文件: {CONFIG_PATH}")
+    cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+    customs = list_custom_providers(cfg)
+    if not customs:
+        raise SystemExit("[!] config 里没有自定义供应商（builtin 之外、source=custom）")
+
+    if args.all or args.provider:
+        kw = (args.provider or "").lower()
+        selected = [(pid, p) for pid, p in customs
+                    if not kw or kw in pid.lower() or kw in (p.get("name") or "").lower()
+                    or kw in (p.get("options") or {}).get("baseURL", "").lower()]
+        if not selected:
+            raise SystemExit(f"[!] 没有匹配「{args.provider}」的供应商；现有："
+                             + ", ".join(p.get("name", pid) for pid, p in customs))
+    else:
+        print(f"找到 {len(customs)} 个自定义供应商：")
+        for i, (pid, p) in enumerate(customs, 1):
+            print(f"  [{i}] {p.get('name', '未命名')}  {(p.get('options') or {}).get('baseURL', '-')}"
+                  f"  （已有 {len(p.get('models') or {})} 模型）")
+        choice = input("选择编号（a=全部，q=退出）: ").strip().lower()
+        if choice == "q":
+            return
+        if choice == "a":
+            selected = customs
+        elif choice.isdigit() and 1 <= int(choice) <= len(customs):
+            selected = [customs[int(choice) - 1]]
+        else:
+            raise SystemExit("[!] 无效选择")
+
+    total = sync(selected, with_reasoning=not args.no_reasoning,
+                 dry_run=args.dry_run, refresh=args.refresh)
+
+    if args.dry_run:
+        print(f"\n[dry-run] 将新增 {total} 个模型，未写配置。去掉 --dry-run 执行写入。")
+        return
+    if total > 0 or args.refresh:
+        bak = CONFIG_PATH.with_name(f"config.json.bak.{int(time.time())}")
+        shutil.copy2(CONFIG_PATH, bak)
+        CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n🎉 已写入配置（新增 {total} 个模型，备份: {bak.name}）。")
+        print("    ZCode 运行中请在界面里切换一下页面刷新模型列表，或重启 ZCode。")
+
+
+if __name__ == "__main__":
+    main()

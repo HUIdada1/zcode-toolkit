@@ -1,0 +1,22 @@
+# 运行时产物
+_sync.log
+_watchdog.pid
+__pycache__/
+*.py[cod]
+
+# 补丁运行时产物（备份 / 逐字节记录）——只属于本机
+*.bak
+*.tps.bak
+*.puller.bak
+*.original.bak
+*-patch.json
+*.chart-patch.json
+*.tps-patch.json
+*.puller-patch.json
+*.tps-tmp
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,43 @@
+{
+  "name": "zcode-patcher",
+  "version": "0.2.1",
+  "description": "ZCode 桌面客户端本地补丁注入工具：思考档位透传、用量页去截断、模型弹窗加宽、TPS 状态栏、设置页模型拉取按钮。全部幂等、可检查、可精确还原，并支持在插件详情页逐项开关。",
+  "author": {
+    "name": "陈浩",
+    "email": "80361619@qq.com"
+  },
+  "skills": "./skills",
+  "commands": "./commands",
+  "userConfig": {
+    "usage_chart": {
+      "type": "boolean",
+      "title": "用量页去截断",
+      "description": "「设置 → 用量」趋势图与饼图全量展示，不再只画 Top 6 / Top 5。字节级补丁：拨动并保存后，下次会话启动即生效，无需重启 ZCode。",
+      "default": false
+    },
+    "model_width": {
+      "type": "boolean",
+      "title": "模型弹窗加宽",
+      "description": "模型选择浮窗 192px → 320px，长模型名不再被截断。字节级补丁：拨动并保存后，下次会话启动即生效，无需重启 ZCode。",
+      "default": false
+    },
+    "tps_footer": {
+      "type": "boolean",
+      "title": "TPS 状态栏",
+      "description": "输入框工具栏统计胶囊（时间·首 token·tok/s·out）。重打包级补丁：拨动并保存后，插件会在 ZCode 退出时自动应用，下次启动生效。",
+      "default": false
+    },
+    "model_puller": {
+      "type": "boolean",
+      "title": "设置页模型拉取按钮",
+      "description": "设置页「⚡️ 自动拉取模型」按钮，勾选即写入配置。重打包级补丁：拨动并保存后，插件会在 ZCode 退出时自动应用，下次启动生效。",
+      "default": false
+    },
+    "core_patch": {
+      "type": "boolean",
+      "title": "思考档位内核补丁（旧版专用）",
+      "description": "仅 ZCode 3.11.2 及更早版本需要；3.14.x 起内核改为原生 optionSpecs 机制，此项请保持关闭。",
+      "default": false
+    }
+  }
+}

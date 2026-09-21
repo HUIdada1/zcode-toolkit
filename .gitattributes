@@ -1,0 +1,4 @@
+# 统一换行符：脚本/文档一律 LF（避免 Windows 检出后 CRLF 破坏 shebang 与跨平台执行）
+* text=auto eol=lf
+*.png binary
+*.jpg binary
