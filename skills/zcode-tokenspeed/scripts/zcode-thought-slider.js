@@ -594,6 +594,51 @@
   }
 
   // ---------- 同步(入口常驻刷新;面板打开时实时跟随) ----------
+  // ---------- 可视化诊断:探针/fiber 断点直接显示在输入框下方(截图即可排障) ----------
+  let diagEl = null;
+  let diagLast = "";
+  function collectDiag() {
+    const out = [];
+    const span = document.querySelector("[data-thought][data-thought-levels]");
+    out.push("探针" + (span ? "✓" : "✗"));
+    if (span) {
+      out.push("档位[" + ((span.getAttribute("data-thought-levels") || "") || "空") + "]");
+      let ju = null;
+      try { ju = span.parentElement ? findThoughtFiber(span.parentElement) : null; } catch (err) { out.push("fiber异常"); }
+      out.push("fiber" + (ju ? "✓" : "✗"));
+    } else {
+      out.push("data-thought×" + document.querySelectorAll("[data-thought]").length);
+      out.push("composer×" + document.querySelectorAll("[data-testid='v4-composer']").length);
+      out.push("触发器×" + document.querySelectorAll("[data-composer-thought-control]").length);
+    }
+    out.push("入口" + (entry && entry.isConnected ? "✓" : "✗"));
+    return out.join(" · ");
+  }
+  function updateDiag(msg) {
+    if (!msg) {
+      if (diagEl) { diagEl.remove(); diagEl = null; }
+      diagLast = "";
+      return;
+    }
+    if (msg === diagLast && diagEl && diagEl.isConnected) return;   // 未变化零 DOM 写
+    diagLast = msg;
+    try {
+      const card = document.querySelector("[data-testid='v4-composer']");
+      if (!card || !card.parentElement) return;
+      if (!diagEl || !diagEl.isConnected) {
+        diagEl = document.createElement("div");
+        diagEl.setAttribute("data-zslider-diag", "1");
+        Object.assign(diagEl.style, {
+          fontSize: "11px", color: "#e0983a", textAlign: "center",
+          marginTop: "4px", userSelect: "none",
+          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        });
+        card.insertAdjacentElement("afterend", diagEl);
+      }
+      diagEl.textContent = "⧗ 思考条诊断:" + msg;
+    } catch (err) { /* 静默 */ }
+  }
+
   function sync() {
     try {
       ensureStyle();
@@ -602,10 +647,15 @@
         closePanel(false);
         if (entry) entry.remove();
         entry = null;
+        updateDiag(collectDiag());
         return;
       }
+      updateDiag(null);
       const trig = anchorTrigger();
-      if (!ensureEntry(trig, p.el)) return;
+      if (!ensureEntry(trig, p.el)) {
+        updateDiag("锚点缺失:触发器" + (trig ? "✓" : "✗") + " 探针父行无父级");
+        return;
+      }
       // 隐藏原生下拉:触发器由 fiber 反查后直接置 display:none,
       // React 重建该元素时会在下一轮 sync 重新隐藏(紧凑模式的 CSS 规则仍作兜底)
       if (trig && trig.style.display !== "none") trig.style.display = "none";
@@ -647,9 +697,10 @@
   else document.addEventListener("DOMContentLoaded", start);
 
   // 自检:加载 5s 后探针状态打到 console(排障用;无档位模型静默属预期)
+  window.__zsliderDiag = collectDiag;
   setTimeout(() => {
-    const p = probe();
-    if (p) console.info("[zslider] 已就绪:", p.levels.join("/"), "当前", p.cur || "(未设)");
-    else console.info("[zslider] 探针未命中或模型无思考档位,入口隐藏");
+    window.__zsliderDiag = collectDiag();
+    if (probe()) console.info("[zslider] 已就绪:", probe().levels.join("/"), "当前", probe().cur || "(未设)");
+    else console.info("[zslider] 探针未命中:", window.__zsliderDiag, "(输入框下方应显示诊断条)");
   }, 5000);
 })();
