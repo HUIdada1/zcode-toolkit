@@ -112,9 +112,12 @@ def check_state(args) -> str:
 def run_patcher(args, revert: bool) -> bool:
     cmd = [sys.executable, str(PATCHER), *args] + (["--revert"] if revert else [])
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(HERE), timeout=300)
-    ok = r.returncode == 0
+    out = (r.stdout or "") + (r.stderr or "")
+    # zcode_patcher.py 拒绝改写时仍返回 0（只在输出里打 [!] 说明原因），必须看输出判定
+    refused = any(mark in out for mark in ("锚点匹配异常", "拒绝", "[!]"))
+    ok = r.returncode == 0 and not refused
     log(f"$ zcode_patcher.py {' '.join(args)}{' --revert' if revert else ''} -> "
-        f"{'ok' if ok else 'FAIL'}\n{(r.stdout or '') + (r.stderr or '')}".rstrip())
+        f"{'ok' if ok else ('拒绝改写' if refused else 'FAIL')}\n{out}".rstrip())
     return ok
 
 
