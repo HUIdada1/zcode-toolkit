@@ -42,6 +42,18 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 - 开关状态与客户端实际状态不一致是正常的：ZCode 的开关默认值（`default: false`）是静态的，不会反映历史补丁状态。**把开关拨成你想要的状态并保存**，同步后两者就一致了。
 - 同步日志在 `scripts/_sync.log`；没找到配置时会记录 `config.json` 里 `plugins` 的实际键名，便于定位宿主的存储位置。
 
+> **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题，与插件清单无关——界面拿到的插件信息里 `userConfig` 为空时，配置区整个不渲染（`Y2t` 组件里 `userConfig` 为空直接 `return null`）。清单本身是正确的（Agent 侧 `M5s` 完整解析、`f5s` 赋 `userConfig: e.manifest.userConfig`、`jGo` 条件展开，链路已逐环节核对）。此时**直接写配置文件**，效果完全一样：
+>
+> `~/.zcode/cli/config.json` → `plugins.options["zcode-patcher@dev-default-22da16fd"]`：
+> ```json
+> "plugins": {
+>   "options": {
+>     "zcode-patcher@dev-default-22da16fd": { "tps_footer": false, "model_puller": true }
+>   }
+> }
+> ```
+> 键名见上表；写入后同样由 `sync.py` 在会话启动时读取并应用。也可以直接打 `/zcode-patch-toggle` 让 AI 代改（会先展示"配置值 vs 实际状态"再改）。改 `config.json` 前先备份一份。
+
 ### 退出后自动注入
 
 重打包级补丁（TPS 状态栏、拉取按钮）要求 ZCode **完全退出**（运行中锁定 `app.asar`）。插件里由 `scripts/apply_after_exit.py` 承担：轮询等 ZCode 退出 → 按期望状态应用/还原 → 写日志。它由开关同步（`sync.py`）在检测到重打包级差异时自动拉起，平时不运行，**不需要常驻服务**。

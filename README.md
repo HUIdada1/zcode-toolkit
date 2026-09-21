@@ -36,11 +36,14 @@ commands/
   zcode-patch-status.md                       /zcode-patch-status 只读检查
   zcode-patch-apply.md                        /zcode-patch-apply  注入
   zcode-patch-revert.md                       /zcode-patch-revert 还原
+  zcode-patch-toggle.md                       /zcode-patch-toggle 逐项开关功能
 ```
 
 ## 功能开关
 
 在「设置 → 插件管理 → 已安装 → 点开本插件」的**配置**区有 5 个开关，分别控制五个补丁。拨动并点「保存配置」后，插件会在下次会话启动时自动把客户端同步过去，不用手打命令。
+
+> **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题（界面拿到的插件信息里 `userConfig` 为空时配置区整个不渲染），与插件清单无关。此时直接写配置文件，效果一样：`~/.zcode/cli/config.json` → `plugins.options["zcode-patcher@dev-default-22da16fd"]`，例如 `{ "tps_footer": false }`。也可以打 `/zcode-patch-toggle` 让 AI 代改。
 
 生效时机分两类：用量图表和弹窗加宽是字节级改写，ZCode 运行中也能写，**下次会话启动即生效**；TPS 状态栏和模型拉取按钮要重写 `app.asar`，运行中被文件锁挡住，所以由看护在 **ZCode 退出时自动应用**，下次启动生效。
 
