@@ -36,6 +36,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:                                   # 控制台编码安全网（见 _console.py 的说明）
+    from _console import bad_mark, glyph, ok_mark, safe_stdio
+except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _console import bad_mark, glyph, ok_mark, safe_stdio
+
 def resolve_v2_root() -> Path:
     """解析 v2 配置根目录：~/.zcode/v2/setting.json 的 dataBaseDir 优先
     （与 ZCode 客户端 bootstrap 同逻辑），未设置时回退 home 目录。"""
@@ -253,7 +259,8 @@ def sync(providers, with_reasoning: bool, dry_run: bool, refresh: bool) -> int:
                     continue
                 changed = refresh_entry(ent, meta, kind)
                 if changed:
-                    print(f"    {'[预览] ' if dry_run else '↻ '}{mid}: " + "；".join(changed))
+                    print(f"    {'[预览] ' if dry_run else glyph('↻', '~') + ' '}{mid}: "
+                          + "；".join(changed))
         if dry_run:
             continue
         pdata["models"] = models
@@ -351,6 +358,7 @@ def sync_provider_config(cfg: dict) -> None:
 
 
 def main() -> None:
+    safe_stdio()          # 输出被重定向时 cp936 会编不出符号，先把这条路封死
     ap = argparse.ArgumentParser(description="ZCode 自定义供应商模型拉取（CLI，不动 asar）")
     ap.add_argument("--all", action="store_true", help="同步全部自定义供应商")
     ap.add_argument("--provider", default=None, help="按名称/ID/baseURL 子串匹配供应商")
@@ -368,7 +376,7 @@ def main() -> None:
         url = args.test[0]
         key = args.test[1] if len(args.test) > 1 else ""
         ok, msg, models, metas = fetch_models_from_api(url, key)
-        print(("✅ " if ok else "❌ ") + msg)
+        print((ok_mark() if ok else bad_mark()) + " " + msg)
         if ok:
             print(f"共 {len(models)} 个模型：")
             for m in models:

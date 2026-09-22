@@ -122,6 +122,12 @@ import sys
 import time
 from pathlib import Path
 
+try:                                   # 控制台编码安全网（见 _console.py 的说明）
+    from _console import bad_mark, ok_mark, safe_stdio
+except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _console import bad_mark, ok_mark, safe_stdio
+
 # 全部补丁的命令行参数名：--all 会一次性把它们打开（新增补丁时只需加进这里）
 ALL_PATCH_FLAGS = (
     "reasoning_config",   # 3.14+ 档位配置（配置侧原生）
@@ -2413,6 +2419,7 @@ def zcode_running() -> bool:
 
 
 def main() -> int:
+    safe_stdio()          # 输出被重定向时 cp936 会编不出 ✓/✗，先把这条路封死
     ap = argparse.ArgumentParser(
         description="ZCode 客户端补丁工具：思考档位（3.14+ 配置侧原生 / ≤3.11 内核补丁）+ 用量页去截断 "
                     "+ TPS 统计栏 + 思考滑条 + 模型拉取按钮（自动探测安装位置）")
@@ -2583,7 +2590,7 @@ def main() -> int:
         for title, target, ok in results:
             p_ = Path(target)
             shown = target if p_.is_dir() else p_.name
-            print(f"  {'✓' if ok else '✗'} {_pad_display(title, 22)}{shown}")
+            print(f"  {ok_mark() if ok else bad_mark()} {_pad_display(title, 22)}{shown}")
         ok_n = sum(1 for *_, ok in results if ok)
         print(f"  合计 {len(results)} 项：成功 {ok_n}，失败 {len(results) - ok_n}")
 

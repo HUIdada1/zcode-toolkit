@@ -319,7 +319,7 @@ find ~/.zcode/cli/plugins -name doctor.py 2>/dev/null
 
 加上 `--json` 可以输出一段结构化报告，方便贴给他人排查。
 
-### 六个最常见的卡点
+### 七个最常见的卡点
 
 | 卡点 | 自检里的样子 | 怎么办 |
 |---|---|---|
@@ -327,12 +327,18 @@ find ~/.zcode/cli/plugins -name doctor.py 2>/dev/null
 | **插件没启用** | 第 4 节 `enabledPlugins` 里没有本插件 | 「设置 → 插件 → 管理已安装」打开开关 |
 | **配置没保存过** | 第 5 节 `plugins.options` 里没有本插件 | 高级信息 → 配置 → 拨开关 → **保存配置**（或 [手动写配置](#3-手动写配置兜底方案)） |
 | **没开过新会话** | 第 7 节没有 `_sync.last` / `_sync.log` | `SessionStart` 钩子在**新会话第一轮**才触发：重启后要真的开一个会话 / 发一条消息 |
-| **钩子没跑过** | 同上 | 确认 `python --version` 可用；「检查更新」升到最新版；再到 `~/.zcode/cli/log/zcode-<日期>.jsonl` 里搜 `session_start_hooks` |
+| **钩子没跑过** | 第 7 节无心跳，且日志里 `hookCount = 0` | 那次启动 ZCode 根本没注册钩子 → 「管理已安装」确认启用 → **完全退出**再启动 → 开个新会话 |
+| **钩子注册了但没执行** | 第 7 节无心跳，但日志里 `hookCount ≥ 1` | 重点查 `python --version` 是否可用（macOS/Linux 试 `python3`）与钩子命令里的 `${CLAUDE_PLUGIN_ROOT}` 展开 |
 | **只重启了一次** | 第 8 节里重打包项显示「未打」 | 再退出一次 ZCode（退出时才写入 `app.asar`），然后启动 |
 
-> 钩子到底跑没跑，有三层证据可以对照，从弱到强：
+> 钩子到底跑没跑，有四层证据，从弱到强（**自检会替你读前三层，不用自己翻**）：
 > ① `scripts/_sync.last` 心跳文件 → ② `scripts/_sync.log` 同步日志 →
-> ③ ZCode 自己的日志 `~/.zcode/cli/log/zcode-<日期>.jsonl` 里的 `session_start_hooks` 阶段。
+> ③ ZCode 日志 `~/.zcode/cli/log/zcode-<日期>.jsonl` 里的 `session_start_hooks` 阶段 →
+> ④ 同一份日志里 `bootstrap.app.startup.plugins.completed` 记录的 **`hookCount`**。
+>
+> 第 ④ 层最有用：它说明**这次启动 ZCode 到底注册了几个钩子**。如果是 `0`，
+> 那就是「插件没启用 / hooks.json 没被读到」，钩子没跑是**必然结果**，跟钩子怎么写无关 ——
+> 自检会直接把这句话打出来，而不是让你在四条原因里猜。
 
 ### 完全绕开插件（保底方案）
 
@@ -467,6 +473,7 @@ skills/zcode-tokenspeed/
   scripts/
     zcode_patcher.py                          主工具：八个补丁
     doctor.py                                 安装自检：一条命令诊断「为什么没生效」（--where 查安装位置）
+    _console.py                               控制台编码安全网（中文 Windows 管道里不能直接打 ✓）
     zcode-tps.js                              TPS 状态栏注入脚本（ServicePort 事件流）
     zcode-thought-slider.js                   思考强度滑条注入脚本
     zcode-enhance-prompt.js                   增强提示词按钮注入脚本

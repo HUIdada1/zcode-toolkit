@@ -18,6 +18,7 @@ zcode_patcher 回归测试（纯标准库 unittest，无第三方依赖）
 import contextlib
 import io
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -1214,6 +1215,190 @@ class TestDoctorDiscovery(unittest.TestCase):
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr[-400:])
         self.assertIn("插件位置扫描", r.stdout)
+
+
+class TestConsoleEncoding(unittest.TestCase):
+    """中文 Windows 的控制台代码页是 cp936（GBK）。输出**走管道**时（`> log.txt`、
+    `subprocess.run(capture_output=True)`）Python 不再走 WriteConsoleW，而是按 cp936 编码 ——
+    这时 print 一个 GBK 里没有的字符会抛 UnicodeEncodeError，**把整段输出打断**。
+
+    真实故障：doctor.py 捕获 zcode_patcher.py 的输出，汇总表在
+    `✓ 用量页去截断补丁` 那一行崩掉，用户只看到半张表 + traceback，
+    还以为是补丁本身失败。交互式控制台不受影响，所以这个坑**只在管道里露头**，
+    平时手动跑脚本永远测不出来。
+    """
+
+    def test_marks_are_printable_in_the_current_stdout_encoding(self):
+        import _console
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        for mark in (_console.ok_mark(), _console.bad_mark(), _console.warn_mark()):
+            mark.encode(enc)      # 编不出来就会抛 UnicodeEncodeError
+
+    def test_glyph_falls_back_when_encoding_cannot_represent_it(self):
+        import _console
+        buf = io.BytesIO()
+        orig = sys.stdout
+        sys.stdout = io.TextIOWrapper(buf, encoding="cp936", errors="strict")
+        try:
+            self.assertEqual(_console.glyph("✓", "v"), "v")
+            self.assertEqual(_console.glyph("✗", "x"), "x")
+            self.assertEqual(_console.glyph("⚠", "!"), "!")
+            self.assertEqual(_console.glyph("✓"), "v")          # 走内置备选表
+            self.assertEqual(_console.glyph("→", "->"), "→")     # cp936 里有 →，不该降级
+        finally:
+            sys.stdout = orig
+
+    def test_safe_stdio_replaces_instead_of_crashing(self):
+        """errors=replace 是最后一道防线：任何编不出的字符都降级，绝不抛异常。"""
+        import _console
+        buf = io.BytesIO()
+        orig = sys.stdout
+        sys.stdout = io.TextIOWrapper(buf, encoding="cp936", errors="strict")
+        try:
+            _console.safe_stdio()
+            self.assertEqual(sys.stdout.errors, "replace")
+            print("✓✗⚠ 混在中文里也不该崩")
+            sys.stdout.flush()
+            raw = buf.getvalue()      # 必须在换回 stdout 前读，否则 wrapper 被 GC 时连 buf 一起关掉
+        finally:
+            sys.stdout = orig
+        self.assertIn("不该崩".encode("cp936"), raw)
+
+    def test_safe_stdio_is_idempotent(self):
+        import _console
+        _console.safe_stdio()
+        _console.safe_stdio()     # 重复调用不该抛（reconfigure 有状态）
+
+    def test_patcher_summary_survives_a_cp936_pipe(self):
+        """端到端回归：把子进程 stdout 强制成 cp936，汇总表必须完整打出来。
+
+        这正是用户报的那次故障 —— 没有 _console 的话，这一行会抛
+        `UnicodeEncodeError: 'gbk' codec can't encode character '\\u2713'`。
+        """
+        try:
+            if not zp.resolve_target(None):
+                self.skipTest("本机没有 ZCode，跳过端到端编码回归")
+        except SystemExit:
+            self.skipTest("本机没有 ZCode，跳过端到端编码回归")
+        env = dict(os.environ, PYTHONIOENCODING="cp936")
+        r = subprocess.run([sys.executable, str(zp.__file__), "--all", "--check"],
+                           capture_output=True, encoding="cp936", errors="replace",
+                           cwd=str(Path(zp.__file__).resolve().parent), timeout=300, env=env)
+        out = (r.stdout or "") + (r.stderr or "")
+        self.assertNotIn("UnicodeEncodeError", out, out[-600:])
+        self.assertNotIn("Traceback", out, out[-600:])
+        self.assertIn("执行汇总", out)
+        self.assertIn("合计 8 项", out)
+
+
+class TestZcodeLogScan(unittest.TestCase):
+    """doctor 会读 ZCode 自己的 jsonl 日志 —— 那里有比心跳文件更靠前的一层证据：
+    `bootstrap.app.startup.plugins.completed` 的 `hookCount`（这次启动注册了几个钩子）。
+
+    用户实测的那份报告里，心跳为空、补丁全未打，结论只能说「钩子从未运行过」，
+    然后甩一张四选一清单。但日志里 hookCount=0 已经说明：
+    那次启动 ZCode 根本没把钩子挂上，「钩子没跑」是必然结果，与钩子写法无关。
+    """
+
+    @staticmethod
+    def _write_log(d: Path, startups, phases: int = 1) -> list[Path]:
+        lines = []
+        for ts, hooks, enabled, diag in startups:
+            lines.append(json.dumps({
+                "timestamp": ts, "level": "info",
+                "event": "bootstrap.app.startup.plugins.completed",
+                "message": "ZCode plugins resolved",
+                "context": {"startupKind": "zcode_app", "pluginCount": 14,
+                            "enabledPluginCount": enabled, "hookCount": hooks,
+                            "diagnosticCount": diag, "skillRootCount": 9},
+            }, ensure_ascii=False))
+        for _ in range(phases):
+            lines.append(json.dumps({
+                "timestamp": "2026-09-22T01:00:00.000Z", "level": "info",
+                "event": "turn.phase.completed", "message": "Turn phase completed",
+                "context": {"queryId": "q", "turnNumber": 0, "phase": "session_start_hooks"},
+            }, ensure_ascii=False))
+        p = d / "zcode-2026-09-22.jsonl"
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return [p]
+
+    def test_scan_reads_hook_count_and_phase_count(self):
+        import doctor
+        with tempfile.TemporaryDirectory() as d:
+            files = self._write_log(Path(d), [("2026-09-22T01:00:00.000Z", 0, 11, 0),
+                                              ("2026-09-22T02:00:00.000Z", 1, 12, 0)])
+            data = doctor._scan_zcode_log(files)
+        self.assertEqual(len(data["startups"]), 2)
+        self.assertEqual(data["startups"][-1]["hooks"], 1)
+        self.assertEqual(data["startups"][-1]["enabled"], 12)
+        self.assertEqual(data["startups"][-1]["kind"], "zcode_app")
+        self.assertEqual(data["phase_count"], 1)
+
+    def test_scan_survives_garbage_lines(self):
+        """日志是逐行追加的，写到一半被截断很正常，不能因此让自检崩掉。"""
+        import doctor
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "zcode-2026-09-22.jsonl"
+            p.write_text('{"hookCount" 这不是 json\n随机一行\n', encoding="utf-8")
+            data = doctor._scan_zcode_log([p])
+        self.assertEqual(data["startups"], [])
+        self.assertEqual(data["phase_count"], 0)
+
+    def test_report_flags_zero_hooks_as_the_cause(self):
+        """hookCount=0 时要直接点明「必然结果」，而不是甩一张四选一清单。"""
+        import doctor
+        with tempfile.TemporaryDirectory() as d:
+            files = self._write_log(Path(d), [("2026-09-22T02:00:00.000Z", 0, 11, 0)])
+            orig = doctor._latest_zcode_logs
+            doctor._latest_zcode_logs = lambda *a, **kw: files
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    data = doctor.report_zcode_log()
+            finally:
+                doctor._latest_zcode_logs = orig
+        out = buf.getvalue()
+        self.assertIn("0 个钩子", out)
+        self.assertIn("不是钩子本身", out)
+        self.assertEqual(data["startups"][-1]["hooks"], 0)
+
+    def test_report_says_plugin_side_is_ready_when_hooks_registered(self):
+        import doctor
+        with tempfile.TemporaryDirectory() as d:
+            files = self._write_log(Path(d), [("2026-09-22T02:00:00.000Z", 2, 12, 0)])
+            orig = doctor._latest_zcode_logs
+            doctor._latest_zcode_logs = lambda *a, **kw: files
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    doctor.report_zcode_log()
+            finally:
+                doctor._latest_zcode_logs = orig
+        out = buf.getvalue()
+        self.assertIn("已经就绪", out)
+        self.assertIn("CLAUDE_PLUGIN_ROOT", out)     # 注册了但没执行 → 才轮到查这个
+
+    def test_verdict_uses_log_evidence_when_hook_never_ran(self):
+        import doctor
+        log_info = {"startups": [{"ts": "2026-09-22 02:00:00", "kind": "zcode_app",
+                                  "plugins": 14, "enabled": 11, "hooks": 0,
+                                  "diagnostics": 0}],
+                    "phase_count": 3, "last_phase": ""}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            doctor.verdict(True, True, True, True, True, True, False, log_info)
+        out = buf.getvalue()
+        self.assertIn("注册的钩子数是 0", out)
+        self.assertIn("完全退出", out)
+
+    def test_verdict_falls_back_to_checklist_without_log(self):
+        """读不到日志（旧版 ZCode / 日志被清过）时仍要给四选一清单。"""
+        import doctor
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            doctor.verdict(True, True, True, True, True, True, False, None)
+        out = buf.getvalue()
+        self.assertIn("依次确认", out)
 
 
 if __name__ == "__main__":

@@ -149,8 +149,23 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
   `${CLAUDE_PROJECT_DIR}` / `${ZCODE_PROJECT_DIR}`、`${CLAUDE_SESSION_ID}`；
   这些变量同时会注入为环境变量。**`userConfig` 的值不在其中**——所以 `sync.py` 必须自己读
   `config.json` 的 `plugins.options`。
-- **执行记录在 ZCode 日志里**：`~/.zcode/cli/log/zcode-<日期>.jsonl`，
-  搜 `session_start_hooks` 看钩子阶段，或看钩子运行的 outcome / duration / 错误流摘要。
+- **执行记录在 ZCode 日志里**：`~/.zcode/cli/log/zcode-<日期>.jsonl`。两类记录最有用：
+  - `turn.phase.*` 且 `context.phase == "session_start_hooks"` —— 会话启动阶段跑过（链路本身是通的）；
+  - `bootstrap.app.startup.plugins.completed` —— context 带 `pluginCount` /
+    `enabledPluginCount` / **`hookCount`** / `diagnosticCount` / `skillRootCount`。
+    **`hookCount` 是最靠前的一层证据**：它表示这次启动 ZCode 到底注册了几个钩子。
+    为 0 就说明「插件没启用 / hooks.json 没被读到」——**轮不到讨论钩子有没有执行**。
+    `doctor.py` 第 7 节会直接读它并给出结论，不用让用户自己去翻日志。
+- **⚠ 中文 Windows 的编码坑（本插件踩过一次真故障）**：控制台是 cp936（GBK）。
+  输出**走管道**时（`> log.txt`、`subprocess.run(capture_output=True)`）Python 不再走
+  WriteConsoleW，而是按 cp936 编码 —— print 一个 GBK 里没有的字符（`✓` `✗` `⚠` `✅` `↻`）
+  会抛 `UnicodeEncodeError`，**把整段输出打断**。实测：doctor 捕获 patcher 输出时，
+  汇总表在 `✓ 用量页去截断补丁` 那行崩掉，用户只看到半张表 + traceback，
+  还以为是补丁本身失败。交互式控制台不受影响 → **这个坑只在管道里露头，手跑脚本测不出来**。
+  → 所有会 print 的脚本都从 `_console.py` 取 `safe_stdio()`（`errors=replace` 兜底，
+  永不崩）与 `ok_mark()` / `bad_mark()` / `warn_mark()` / `glyph()`（编不出就换 ASCII 备选）。
+  **`√` `×` `→` `·` `□` 在 cp936 里是有的**，所以标记用 `√`/`×` 而不是 `✓`/`✗`。
+  新增会打印的符号前，先 `'字'.encode('cp936')` 试一下。
 
 > **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题，与插件清单无关——界面拿到的插件信息里 `userConfig` 为空时，配置区整个不渲染（`Y2t` 组件里 `userConfig` 为空直接 `return null`）。清单本身是正确的（Agent 侧 `M5s` 完整解析、`f5s` 赋 `userConfig: e.manifest.userConfig`、`jGo` 条件展开，链路已逐环节核对）。此时**直接写配置文件**，效果完全一样：
 >

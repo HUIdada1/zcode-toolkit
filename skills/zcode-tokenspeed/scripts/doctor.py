@@ -42,6 +42,12 @@ PATCHER = HERE / "zcode_patcher.py"
 LOG = HERE / "_sync.log"
 STAMP = HERE / "_sync.last"
 
+try:                                   # 控制台编码安全网（见 _console.py 的说明）
+    from _console import safe_stdio
+except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
+    sys.path.insert(0, str(HERE))
+    from _console import safe_stdio
+
 PLUGIN_NAME = "zcode-tokenspeed"
 REPO_NAME = "zcode-toolkit"
 MIN_PY = (3, 10)
@@ -454,7 +460,7 @@ def check_hook(dirs: list[Path]) -> bool:
     return ok
 
 
-def check_heartbeat(dirs: list[Path]) -> bool:
+def check_heartbeat(dirs: list[Path]) -> tuple[bool, dict]:
     hr("7. 钩子执行痕迹")
     fired = False
     for d in dirs:
@@ -478,15 +484,12 @@ def check_heartbeat(dirs: list[Path]) -> bool:
         print(f"{BAD} 已安装副本里没有任何执行痕迹 —— 钩子**从未运行过**")
         print("       常见原因：插件没启用 / 保存配置后没开过新会话 / python 不在 PATH /")
         print("                 装的是改动前的旧版本（旧版钩子没有心跳文件）")
-    logd = _zcode_log_dir()
-    if logd:
-        print(f"{INFO} ZCode 自己的日志（钩子触发/超时/失败都记在这里）：{logd}")
-        print("       SessionStart 钩子在**新会话的第一轮**触发；"
-              "在日志里搜 `session_start_hooks` 能看到它有没有跑")
+    # 心跳只能证明「跑没跑」；要判断「为什么没跑」，得看 ZCode 自己的日志
+    log_info = report_zcode_log()
     if STAMP.is_file():
         print(f"{INFO} 本目录（源码仓库）心跳："
               f"{STAMP.read_text(encoding='utf-8', errors='replace').strip()}")
-    return fired
+    return fired, log_info
 
 
 def _zcode_log_dir() -> Path | None:
@@ -498,14 +501,114 @@ def _zcode_log_dir() -> Path | None:
     return None
 
 
+def _latest_zcode_logs(limit: int = 3) -> list[Path]:
+    d = _zcode_log_dir()
+    if not d:
+        return []
+    try:
+        files = sorted((p for p in d.glob("zcode-*.jsonl") if p.is_file()),
+                       key=lambda p: p.name)
+    except OSError:
+        return []
+    return files[-limit:]
+
+
+def _scan_zcode_log(files: list[Path]) -> dict:
+    """从 ZCode 自己的 jsonl 日志里提取「插件解析」与「会话启动阶段」记录。
+
+    只认两类记录（本机 ZCode 3.14.3 实测结构）：
+      * `bootstrap.app.startup.plugins.completed` —— context 带
+        pluginCount / enabledPluginCount / **hookCount** / diagnosticCount / skillRootCount。
+        **hookCount 是关键**：它表示 ZCode 这次启动到底注册了几个钩子。
+        为 0 就说明「插件没启用」或「hooks.json 没被读到」——
+        轮不到讨论钩子有没有执行，这是比心跳文件更靠前的一层证据。
+      * `turn.phase.*` 且 phase == "session_start_hooks" —— 会话启动阶段跑过。
+    """
+    startups: list[dict] = []
+    phase_count = 0
+    last_phase = ""
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if "session_start_hooks" in line:
+                phase_count += 1
+                try:
+                    rec = json.loads(line)
+                    last_phase = str(rec.get("timestamp", ""))[:19].replace("T", " ")
+                except Exception:
+                    pass
+                continue
+            if '"hookCount"' not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if rec.get("event") != "bootstrap.app.startup.plugins.completed":
+                continue
+            ctx = rec.get("context") or {}
+            startups.append({
+                "ts": str(rec.get("timestamp", ""))[:19].replace("T", " "),
+                "kind": str(ctx.get("startupKind") or "?"),
+                "plugins": ctx.get("pluginCount"),
+                "enabled": ctx.get("enabledPluginCount"),
+                "hooks": ctx.get("hookCount"),
+                "diagnostics": ctx.get("diagnosticCount"),
+            })
+    return {"startups": startups, "phase_count": phase_count, "last_phase": last_phase}
+
+
+def report_zcode_log() -> dict:
+    """把 ZCode 日志里的钩子证据读出来打印（比让用户自己去翻强得多）。"""
+    files = _latest_zcode_logs()
+    logd = _zcode_log_dir()
+    if not files:
+        print(f"{WARN} 读不到 ZCode 日志（{logd or '日志目录不存在'}）")
+        return {}
+    data = _scan_zcode_log(files)
+    print(f"{INFO} ZCode 日志：{logd}（读的是 {', '.join(f.name for f in files)}）")
+    st = data["startups"]
+    if not st:
+        print(f"{WARN} 日志里没有「插件解析」记录")
+    else:
+        print("        最近几次启动（时间 / 插件数 / 启用 / 钩子 / 诊断）：")
+        for s in st[-4:]:
+            print(f"          {s['ts']}  {s['kind']:<10} {s['plugins']} / {s['enabled']} / "
+                  f"**{s['hooks']}** / {s['diagnostics']}")
+        last = st[-1]
+        if last["hooks"] in (0, None):
+            print(f"{BAD} 最近一次启动注册了 **0 个钩子** —— ZCode 根本没把本插件的钩子挂上。")
+            print("       也就是说，那次启动时插件还没启用（或 hooks.json 没被读到），")
+            print("       「钩子没跑」是必然结果，**不是钩子本身有问题**。")
+        else:
+            print(f"{OK} 最近一次启动注册了 {last['hooks']} 个钩子 —— 插件侧已经就绪")
+            print("       若仍没有心跳，那才是「注册了但没执行」，重点查 python 是否在 PATH、")
+            print("       以及钩子命令里的 ${CLAUDE_PLUGIN_ROOT} 有没有被正确展开。")
+        if last["diagnostics"]:
+            print(f"{WARN} diagnosticCount={last['diagnostics']} —— 插件解析有诊断信息，值得细看日志")
+    if data["phase_count"]:
+        print(f"{INFO} session_start_hooks 阶段出现 {data['phase_count']} 次"
+              f"（最近 {data['last_phase']}）—— 会话启动链路本身是通的")
+    else:
+        print(f"{WARN} 日志里没有 session_start_hooks 阶段")
+    return data
+
+
 def check_patches() -> None:
     hr("8. 补丁在客户端里的实际状态")
     if not PATCHER.is_file():
         print(f"{BAD} 找不到 {PATCHER}")
         return
+    # 强制子进程用 UTF-8：中文 Windows 的 cp936 编不出 ✓/✗，会让子进程在
+    # 打印汇总表时抛 UnicodeEncodeError（整张表断在半路）。这里两边都用 utf-8 对齐。
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
     try:
         r = subprocess.run([sys.executable, str(PATCHER), "--all", "--check"],
-                           capture_output=True, text=True, cwd=str(HERE), timeout=180)
+                           capture_output=True, encoding="utf-8", errors="replace",
+                           cwd=str(HERE), timeout=180, env=env)
     except Exception as e:
         print(f"{BAD} 执行失败：{e!r}")
         return
@@ -518,7 +621,7 @@ def check_patches() -> None:
 
 
 def verdict(py_ok: bool, zcode_ok: bool, has_plugin: bool, enabled: bool,
-            saved: bool, hook_ok: bool, fired: bool) -> None:
+            saved: bool, hook_ok: bool, fired: bool, log_info: dict | None = None) -> None:
     hr("结论")
     if not py_ok:
         print("Python 版本不满足要求 —— 先装 Python 3.10+，并确保 `python --version` 能跑通。")
@@ -544,11 +647,21 @@ def verdict(py_ok: bool, zcode_ok: bool, has_plugin: bool, enabled: bool,
         return
     if not fired:
         print("★ 卡点：开关已保存，但**钩子从未运行过**。")
-        print("  依次确认：① 保存配置后是否**完全退出**（托盘右键退出）并重启过 ZCode；")
-        print("            ② 重启后是否**开了一个新会话**（SessionStart 在新会话第一轮才触发）；")
-        print("            ③ 命令行 `python --version` 是否可用（macOS/Linux 试 `python3 --version`）；")
-        print("            ④ 已安装副本是不是最新版（「检查更新」）。")
-        print("  → 兜底：不依赖钩子，直接用命令行打补丁：")
+        st = (log_info or {}).get("startups") or []
+        if st and st[-1].get("hooks") in (0, None):
+            print("  日志已经给出直接原因：**最近一次启动注册的钩子数是 0**。")
+            print("  也就是说那次启动时 ZCode 没把本插件的钩子挂上（插件未启用 /")
+            print("  hooks.json 没被读到），「钩子没跑」是必然的，跟钩子写法无关。")
+            print("  → ① 「设置 → 插件 → 管理已安装」确认是**启用**状态；")
+            print("    ② **完全退出** ZCode（托盘图标右键 → 退出，关窗口不算）再启动；")
+            print("    ③ 启动后**开一个新会话**（SessionStart 在新会话第一轮才触发）；")
+            print("    ④ 再跑一次本自检，第 7 节应出现心跳。")
+        else:
+            print("  依次确认：① 保存配置后是否**完全退出**（托盘右键退出）并重启过 ZCode；")
+            print("            ② 重启后是否**开了一个新会话**（SessionStart 在新会话第一轮才触发）；")
+            print("            ③ 命令行 `python --version` 是否可用（macOS/Linux 试 `python3 --version`）；")
+            print("            ④ 已安装副本是不是最新版（「检查更新」）。")
+        print("  → 兜底：不依赖钩子，直接用命令行打补丁（**完全退出 ZCode 后**执行）：")
         print(f'       python "{PATCHER}" --all')
         return
     print("链路完整：插件已启用、开关已保存、钩子跑过。")
@@ -560,6 +673,7 @@ def verdict(py_ok: bool, zcode_ok: bool, has_plugin: bool, enabled: bool,
 # ------------------------------------------------------------------ 入口
 
 def main() -> int:
+    safe_stdio()          # 输出被重定向时 cp936 会编不出符号，先把这条路封死
     ap = argparse.ArgumentParser(description="zcode-tokenspeed 安装自检（只读，不改任何文件）")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出（便于贴给别人看）")
     ap.add_argument("--where", action="store_true",
@@ -576,6 +690,8 @@ def main() -> int:
     saved = bool(_saved_options())
 
     if args.json:
+        log_files = _latest_zcode_logs()
+        log_data = _scan_zcode_log(log_files) if log_files else {}
         print(json.dumps({
             "python": sys.version.split()[0],
             "executable": sys.executable,
@@ -586,6 +702,11 @@ def main() -> int:
             "saved_options": _saved_options(),
             "hook_fired": any(
                 (d / "skills" / PLUGIN_NAME / "scripts" / STAMP.name).is_file() for d in dirs),
+            "zcode_log": {
+                "files": [f.name for f in log_files],
+                "startups": (log_data.get("startups") or [])[-5:],
+                "session_start_hooks_phases": log_data.get("phase_count"),
+            },
         }, ensure_ascii=False, indent=2))
         return 0
 
@@ -596,9 +717,9 @@ def main() -> int:
     has_plugin, dirs, enabled = check_plugin()
     saved = check_options()
     hook_ok = check_hook(dirs)
-    fired = check_heartbeat(dirs)
+    fired, log_info = check_heartbeat(dirs)
     check_patches()
-    verdict(py_ok, zcode_ok, has_plugin, enabled, saved, hook_ok, fired)
+    verdict(py_ok, zcode_ok, has_plugin, enabled, saved, hook_ok, fired, log_info)
     print()
     return 0
 

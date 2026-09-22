@@ -43,6 +43,13 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
+try:                                   # 控制台编码安全网（见 _console.py 的说明）
+    from _console import safe_stdio, warn_mark
+except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _console import safe_stdio, warn_mark
+
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
@@ -292,6 +299,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     global ARGS, CAP_FILE
+    safe_stdio()          # 输出被重定向时 cp936 会编不出符号，先把这条路封死
     ap = argparse.ArgumentParser(description="ZCode 请求捕获代理：验证思考等级等参数是否真的发出")
     ap.add_argument("--listen", default="127.0.0.1:7864", help="监听地址（默认 127.0.0.1:7864）")
     ap.add_argument("--target", required=True, help="转发目标，如 http://127.0.0.1:7863")
@@ -313,7 +321,7 @@ def main() -> None:
     _log(f"  记录 : {ARGS.capture}")
     _log(f"  → 把 ZCode 里（测试用）供应商的 Base URL 指到 http://{host}:{port}/v1 即可")
     _log(f"  → Ctrl-C 结束\n")
-    _log("  ⚠ 安全提醒：本代理会**看到你的 API Key**（原样转发 Authorization / x-api-key 头），")
+    _log(f"  {warn_mark()} 安全提醒：本代理会**看到你的 API Key**（原样转发 Authorization / x-api-key 头），")
     _log("    捕获文件里含请求体与凭据 —— 不要提交到仓库、不要分享；")
     _log("    测完请把供应商的 Base URL 改回原地址，避免长期走代理。\n")
 

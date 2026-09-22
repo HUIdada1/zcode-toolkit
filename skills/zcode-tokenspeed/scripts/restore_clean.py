@@ -32,6 +32,12 @@ import sys
 import time
 from pathlib import Path
 
+try:                                   # 控制台编码安全网（见 _console.py 的说明）
+    from _console import ok_mark, safe_stdio, warn_mark
+except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _console import ok_mark, safe_stdio, warn_mark
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import zcode_patcher as zp
@@ -108,6 +114,7 @@ def stale_local_backups(res: Path) -> list[Path]:
 
 
 def main() -> int:
+    safe_stdio()          # 输出被重定向时 cp936 会编不出符号，先把这条路封死
     ap = argparse.ArgumentParser(description="ZCode 紧急还原（从干净备份整包恢复）")
     ap.add_argument("--backup-dir", default=None, help="备份目录（默认 ~/.zcode/patcher-backups）")
     ap.add_argument("--latest", action="store_true", help="用最新备份还原")
@@ -189,9 +196,9 @@ def main() -> int:
         print(f"  ✓ app.asar 已还原（{src_asar.stat().st_size:,} 字节）")
         if src_cjs:
             shutil.copy2(src_cjs, tgt_cjs)
-            print(f"  ✓ zcode.cjs 已还原（{src_cjs.stat().st_size:,} 字节）")
+            print(f"  {ok_mark()} zcode.cjs 已还原（{src_cjs.stat().st_size:,} 字节）")
         else:
-            print("  ⚠ 该版本无 zcode.cjs 备份，内核未改回")
+            print(f"  {warn_mark()} 该版本无 zcode.cjs 备份，内核未改回")
     except OSError as e:
         print(f"[!] 写入被拒绝（ZCode 未完全退出 或 需要管理员权限）：{e}")
         return 1
@@ -207,7 +214,7 @@ def main() -> int:
                 pass
     if cleaned:
         print(f"  · 已清理 {cleaned} 个补丁产物（备份/sidecar/临时文件）")
-    print("\n✓ 还原完成，请启动 ZCode 验证")
+    print(f"\n{ok_mark()} 还原完成，请启动 ZCode 验证")
     return 0
 
 
