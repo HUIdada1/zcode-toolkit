@@ -92,10 +92,10 @@ python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer --revert 
 
 ## 插件开关
 
-「设置 → 插件管理 → 已安装 → 点开本插件」的**配置**区有 5 个开关,分别控制五个补丁。拨动并点「保存配置」后,插件在下次会话启动时自动把客户端同步过去,不用手打命令。
+「设置 → 插件管理 → 已安装 → 点开本插件」的**配置**区有 7 个开关,分别控制七个补丁。拨动并点「保存配置」后,插件在下次会话启动时自动把客户端同步过去,不用手打命令。
 
 - **只同步你显式保存过的开关**——没拨过的一律不碰,首次安装不会自动改动客户端;
-- 生效时机:用量图表、弹窗加宽是字节级改写,下次会话启动即生效;TPS 状态栏、滑条、拉取按钮要重写 `app.asar`,由看护在 **ZCode 退出时自动应用**;
+- 生效时机:档位配置是配置侧写入、用量图表/弹窗加宽是字节级改写,下次会话启动即生效;TPS 状态栏、滑条、拉取按钮要重写 `app.asar`,由看护在 **ZCode 退出时自动应用**;
 - `core_patch`(思考档位内核补丁)只对 ZCode 3.11.2 及更早有效,3.14.x 用原生 `optionSpecs` 机制,保持关闭即可;
 - 详情页没有「配置」区(渲染问题)时,直接写 `~/.zcode/cli/config.json` → `plugins.options["zcode-tokenspeed@dev-default-22da16fd"]`,或打 `/zcode-patch-toggle` 让 AI 代改。
 
@@ -105,7 +105,7 @@ python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer --revert 
 .zcode-plugin/plugin.json                    清单(含功能开关的 userConfig 声明)
 skills/zcode-tokenspeed/SKILL.md             执行流程 + 逆向笔记 + 排障(AI 代执行入口)
 skills/zcode-tokenspeed/scripts/
-  zcode_patcher.py                           主工具:六个补丁(解析/重打包 asar 不依赖 Node)
+  zcode_patcher.py                           主工具:七个补丁(解析/重打包 asar 不依赖 Node)
   zcode-tps.js                               TPS 统计条注入脚本(ServicePort 事件流)
   zcode-thought-slider.js                    思考强度滑条注入脚本(奔跑小人滑块)
   zcode-model-puller.js                      模型拉取按钮前端脚本
