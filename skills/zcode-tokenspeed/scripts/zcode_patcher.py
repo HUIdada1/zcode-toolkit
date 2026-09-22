@@ -1350,8 +1350,8 @@ catch(n){return{success:!1,error:String(n)}}});
 
 def _enhance_preload_block(electron_alias: str) -> bytes:
     e = electron_alias
-    body = (f'enhancePrompt:(t,n)=>{e}.ipcRenderer.invoke("zcode:enhance-prompt",'
-            f'{{text:t,modelValue:n}}),').encode()
+    body = (f'enhancePrompt:(t,n,o)=>{e}.ipcRenderer.invoke("zcode:enhance-prompt",'
+            f'{{text:t,modelValue:n,modelLabel:o}}),').encode()
     return _wrap_block(ENHANCE_BLOCK, body)
 
 
@@ -1359,38 +1359,35 @@ def _enhance_main_block(ipc_alias: str) -> bytes:
     """在 ipcMain 别名的 SaveMcpToUserDirectory 前插入「增强提示词」handler。
     用界面当前选中的模型（config.json 里解析 baseURL/apiKey/kind）调一次对话补全，
     提示词与 WorkBuddy 的 input.enhance 功能同源。"""
-    h = ipc_alias
-    return _wrap_block(ENHANCE_BLOCK, _ENHANCE_HANDLER.replace("__H__", h).encode())
+    body = (_ENHANCE_HANDLER
+            .replace("__H__", ipc_alias)
+            .replace("__SYS__", json.dumps(_ENHANCE_SYSTEM_PROMPT, ensure_ascii=False))
+            .replace("__TPL__", json.dumps(_ENHANCE_USER_TEMPLATE, ensure_ascii=False)))
+    return _wrap_block(ENHANCE_BLOCK, body.encode())
 
 
-_ENHANCE_SYSTEM_PROMPT = (
-    "You are a Prompt Engineering Expert specializing in improving user prompts for a "
-    "development code assistant. Analyze the given prompt and produce a more effective version "
-    "while keeping its core purpose.\n"
-    "RULES://n"
-    "1. Language matching is the highest priority: reply in exactly the same language as the "
-    "user's input (Chinese stays Chinese, English stays English, mixed stays mixed).\n"
-    "2. Keep the enhanced prompt concise (roughly under 800 characters).\n"
-    "3. Do NOT answer the request, do NOT explain how, do NOT add guides, do NOT suggest "
-    "specific technologies unless the user mentioned them.\n"
-    "4. Output only the enhanced prompt — no preface, no commentary, no markdown fences."
-)
+_ENHANCE_SYSTEM_PROMPT = """You are a Prompt Engineering Expert specializing in improving user prompts for a development code assistant. Analyze the given prompt and produce a more effective version while keeping its core purpose.
+RULES:
+1. Language matching is the highest priority: reply in exactly the same language as the user's input (Chinese stays Chinese, English stays English, mixed stays mixed).
+2. Keep the enhanced prompt concise (roughly under 800 characters).
+3. Do NOT answer the request, do NOT explain how, do NOT add guides, do NOT suggest specific technologies unless the user mentioned them.
+4. Output only the enhanced prompt — no preface, no commentary, no markdown fences."""
 
-_ENHANCE_USER_TEMPLATE = (
-    "USER INPUT://n{input}//n//n"
-    "TASK://nRewrite the user input into a clearer, more specific prompt for the target AI "
-    "assistant. Preserve intent, topic, constraints and expected output type.\n"
-    "CRITICAL - LANGUAGE CONSISTENCY: write the enhanced prompt in the same language as the "
-    "user input; never include language analysis or language labels in the output.\n"
-    "REQUIREMENTS: return only the enhanced prompt text; make a substantive enhancement "
-    "(clarify task, scope, constraints, expected output); if it is already clear, lightly "
-    "polish it; keep it complete and concise (no dangling list or trailing colon)."
-)
+_ENHANCE_USER_TEMPLATE = """USER INPUT:
+{input}
+
+TASK:
+Rewrite the user input into a clearer, more specific prompt for the target AI assistant. Preserve intent, topic, constraints and expected output type.
+CRITICAL - LANGUAGE CONSISTENCY: write the enhanced prompt in the same language as the user input; never include language analysis or language labels in the output.
+REQUIREMENTS: return only the enhanced prompt text; make a substantive enhancement (clarify task, scope, constraints, expected output); if it is already clear, lightly polish it; keep it complete and concise (no dangling list or trailing colon)."""
 
 _ENHANCE_HANDLER = '''
-__H__.handle("zcode:enhance-prompt",async(e,t)=>{
+__H__.handle("zcode:enhance-prompt",async(ev,t)=>{
 try{
 let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os");
+// 注意：主进程 bundle 是 ESM（package.json type=module），**没有 require**——
+// 取 Node 内置模块必须用动态 import（与 zcode:fetch-models-from-url 的写法保持一致）。
+let{default:httpsMod}=await import("node:https"),{default:httpMod}=await import("node:http");
 let base=i.homedir();
 try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
 if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
@@ -1399,63 +1396,84 @@ let cfg={provider:{}};
 try{let d=JSON.parse(n.readFileSync(r.join(root,"config.json"),"utf-8"));
 if(d&&typeof d=="object"&&!Array.isArray(d))cfg=d}catch(_){}
 let text=String((t&&t.text)||"").trim();
-if(!text)return{success:!1,error:"输入框是空的"};
-// 目标模型：优先用界面当前选中值（形如 providerId/modelId），否则退回第一个可用的自定义供应商
-let pick=null,mv=String((t&&t.modelValue)||"").trim();
+if(!text)return{success:!1,code:"empty",error:"输入框是空的"};
+let prov=cfg.provider||{};
+let mv=String((t&&t.modelValue)||"").trim();
+let ml=String((t&&t.modelLabel)||"").trim().toLowerCase();
+let pick=null,how="";
+// ① 界面直接给的 ref（providerId/modelId）——最准
 if(mv){let k=mv.indexOf("/");
 if(k>0){let pid=mv.slice(0,k),mid=mv.slice(k+1);
-let p=cfg.provider&&cfg.provider[pid];
-if(p&&p.models&&p.models[mid])pick={pid:pid,mid:mid,p:p}}}
+let pp=prov[pid];
+if(pp&&pp.models&&pp.models[mid]){pick={pid:pid,mid:mid,p:pp};how="ref"}}}
+// ② 界面上的模型显示名 → 在配置里按 modelId / name 反查
+if(!pick&&ml){
+for(let ent of Object.entries(prov)){
+let pid=ent[0],pp=ent[1];
+if(!pp||typeof pp!="object"||String(pid).startsWith("builtin:"))continue;
+for(let mid of Object.keys(pp.models||{})){
+let mm=pp.models[mid]||{};
+let names=[mid,mm.name,pid+"/"+mid];
+for(let cand of names){
+if(cand&&String(cand).trim().toLowerCase()===ml){pick={pid:pid,mid:mid,p:pp};how="label";break}}
+if(pick)break}
+if(pick)break}}
+// ③ 兜底：第一个带 Base URL 的自定义供应商的首个模型
 if(!pick){
-for(let ent of Object.entries(cfg.provider||{})){
-let pid=ent[0],p=ent[1];
-if(String(pid).startsWith("builtin:"))continue;
-if(!p||typeof p!="object")continue;
-let mid=Object.keys(p.models||{})[0];
-if(mid&&p.options&&p.options.baseURL){pick={pid:pid,mid:mid,p:p};break}}}
-if(!pick)return{success:!1,error:"没找到可用的模型：请先在设置里配置供应商与 API Key"};
+for(let ent of Object.entries(prov)){
+let pid=ent[0],pp=ent[1];
+if(!pp||typeof pp!="object"||String(pid).startsWith("builtin:"))continue;
+let mid=Object.keys(pp.models||{})[0];
+if(mid&&pp.options&&pp.options.baseURL){pick={pid:pid,mid:mid,p:pp};how="fallback";break}}}
+if(!pick)return{success:!1,code:"no-model",error:"没有可用的模型：请先在设置里配置供应商与 API Key"};
 let u=String(pick.p.options.baseURL||"").replace(/\\/+$/,"");
 let k=String(pick.p.options.apiKey||"");
+if(!u)return{success:!1,code:"no-baseurl",error:"供应商「"+pick.pid+"」没有填 Base URL"};
+if(!k)return{success:!1,code:"no-key",error:"供应商「"+pick.pid+"」没有填 API Key"};
 let kind=String(pick.p.kind||"openai-compatible");
-let sys="__SYS__",tpl="__TPL__";
-let user=tpl.replace("{input}",text);
-let cs=[],body,headers={"Content-Type":"application/json","Accept":"application/json"};
-if(k){headers.Authorization="Bearer "+k;headers["x-api-key"]=k}
+let sys=__SYS__,tpl=__TPL__;
+let user=tpl.split("{input}").join(text);
+let cs=[],body;
+let headers={"Content-Type":"application/json","Accept":"application/json",Authorization:"Bearer "+k,"x-api-key":k};
 if(kind==="anthropic"){
-let b=(u.endsWith("/v1")?u:u+"/v1");
-cs.push(b+"/messages");
+cs.push((u.endsWith("/v1")?u:u+"/v1")+"/messages");
 body={model:pick.mid,max_tokens:2048,system:sys,messages:[{role:"user",content:user}]}}
 else{
-let b=(u.endsWith("/v1")?u:u+"/v1");
-cs.push(b+"/chat/completions");
+cs.push((u.endsWith("/v1")?u:u+"/v1")+"/chat/completions");
 cs.push(u+"/chat/completions");
 body={model:pick.mid,stream:!1,temperature:0.3,max_tokens:2048,
 messages:[{role:"system",content:sys},{role:"user",content:user}]}}
 let payload=JSON.stringify(body);
+let lastErr="";
 for(let cur of cs){
+let mod=cur.indexOf("https:")===0?httpsMod:httpMod;
+if(!mod){lastErr="无法加载 Node HTTP 模块";continue}
 let res=await new Promise(resolve=>{
-let mod=cur.startsWith("https:")?require("node:https"):require("node:http");
-let req=mod.request(cur,{method:"POST",headers:Object.assign({},headers,{"Content-Length":Buffer.byteLength(payload)}),timeout:60000},r=>{
-let b="";r.on("data",c=>b+=c);
-r.on("end",()=>{
-if(r.statusCode>=200&&r.statusCode<300){try{
+let req=mod.request(cur,{method:"POST",headers:Object.assign({},headers,{"Content-Length":Buffer.byteLength(payload)}),timeout:60000},r2=>{
+let b="";r2.on("data",c=>b+=c);
+r2.on("end",()=>{
+if(r2.statusCode>=200&&r2.statusCode<300){try{
 let j=JSON.parse(b),out="";
-if(j&&j.choices&&j.choices[0]){let m0=j.choices[0].message||{};out=String(m0.content||"")}
-if(!out&&j&&Array.isArray(j.content)){out=j.content.map(function(c){return String(c&&c.text||"")}).join("")}
-if(!out&&j&&typeof j.output_text=="string")out=j.output_text;
-out=out.trim();
-if(out)return resolve({success:!0,text:out,model:pick.mid})
-return resolve({success:!1,error:"模型返回了空内容"})
-}catch(err){return resolve({success:!1,error:"响应解析失败: "+String(err)})}}
+if(j&&j.choices&&j.choices[0]){let m0=j.choices[0].message||{};out=String(m0.content||"");if(!out&&typeof j.choices[0].text==="string")out=j.choices[0].text}
+if(!out&&j&&Array.isArray(j.content))out=j.content.map(function(c){return String(c&&c.text||"")}).join("");
+if(!out&&j&&typeof j.output_text==="string")out=j.output_text;
+out=String(out||"").trim();
+if(out)return resolve({success:!0,text:out,model:pick.mid,provider:pick.pid,how:how});
+return resolve({success:!1,code:"empty-reply",error:"模型返回了空内容（HTTP "+r2.statusCode+"）"});
+}catch(perr){return resolve({success:!1,code:"parse",error:"响应解析失败："+String(perr)})}}
 let msg="";
 try{let j=JSON.parse(b);msg=(j&&(j.error&&(j.error.message||j.error)||j.message))||""}catch(_){msg=b.slice(0,200)}
-return resolve({success:!1,error:"HTTP "+r.statusCode+(msg?(" "+String(msg)):"")})})});
-req.on("error",err=>resolve({success:!1,error:"请求失败: "+String(err&&err.message||err)}));
-req.on("timeout",()=>{req.destroy();resolve({success:!1,error:"请求超时（60s）"})});
+return resolve({success:!1,code:"http",status:r2.statusCode,error:"HTTP "+r2.statusCode+(msg?("："+String(msg)):"")})})});
+req.on("error",err=>resolve({success:!1,code:"network",error:"请求失败："+String(err&&err.message||err)}));
+req.on("timeout",()=>{req.destroy();resolve({success:!1,code:"timeout",error:"请求超时（60 秒）"})});
 req.write(payload);req.end()});
-if(res)return res}
-return{success:!1,error:"未能连通 "+u+"，请检查供应商地址与协议类型"}
-}catch(e){return{success:!1,error:String(e)}}});
+if(res&&res.success)return res;
+lastErr=(res&&res.error)||lastErr;
+// 4xx（除 429）是请求本身的问题，换地址重试也没用，直接返回
+if(res&&res.code==="http"&&res.status>=400&&res.status<500&&res.status!==429)return res;
+}
+return{success:!1,code:"unreachable",error:lastErr||("未能连通 "+u+"，请检查供应商地址与协议类型")};
+}catch(err2){return{success:!1,code:"exception",error:"增强失败："+String(err2&&err2.message||err2)}}});
 '''
 
 
