@@ -30,4 +30,4 @@ probe-max-tokens*.jsonl
 .idea/
 .DS_Store
 Thumbs.db
-scripts/_apply_after_exit.log
+apply_after_exit.log
