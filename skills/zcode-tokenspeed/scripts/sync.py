@@ -10,6 +10,8 @@
 避免插件在用户没表态时改动客户端文件。
 
 诊断日志：scripts/_sync.log
+心跳文件：scripts/_sync.last（每次被调用都刷新，用来证明「钩子到底跑没跑」）
+安装自检：python doctor.py（一条命令给出整条链路的结论）
 """
 
 import json
@@ -26,6 +28,10 @@ CONFIG = Path.home() / ".zcode" / "cli" / "config.json"
 # 因此按前缀匹配而不是写死某个 id —— 换台机器/换安装方式也能正确定位配置。
 PLUGIN_ID_PREFIX = "zcode-tokenspeed"
 LOG = HERE / "_sync.log"
+# 「钩子到底跑没跑」的心跳文件：每次被调用都刷新一次时间戳。
+# 为什么需要它：没拨过开关时 sync 什么也不做、日志也是空的，「钩子没触发」与
+# 「触发了但无事可做」在日志里长得一模一样——排查安装问题时这是最关键的一条信息。
+STAMP = HERE / "_sync.last"
 
 # 配置键 -> (zcode_patcher.py 参数, 是否重打包级)
 PATCHES = [
@@ -48,6 +54,21 @@ def log(msg: str) -> None:
         import time
         with open(LOG, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+
+def beat(msg: str) -> None:
+    """刷新心跳文件，证明「钩子确实被调用过」，并写明这次做了什么。
+
+    排查「插件装了没生效」时这是第一条要看的信息：心跳文件不存在 = 钩子没跑；
+    存在但写着「未保存过开关」= 钩子跑了，只是用户没在配置里拨开关（按设计不动客户端）。
+    """
+    try:
+        import time
+        how = "钩子" if len(sys.argv) == 1 else "手动"
+        STAMP.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  [{how}] {msg}\n",
+                         encoding="utf-8")
     except Exception:
         pass
 
@@ -137,13 +158,16 @@ def start_watchdog(wanted: dict) -> None:
 
 
 def main() -> None:
+    beat("已启动")
     opts, source = read_options()
     if source is None:
+        beat("配置里没有本插件（从未保存过开关）→ 按设计未做任何操作")
         return  # 用户从未保存过开关，保持现状
 
     explicit = {k: v for k, v in opts.items() if isinstance(v, bool)}
     if not explicit:
         log(f"配置来自 {source}，但没有可用的布尔开关值: {opts}")
+        beat(f"配置来自 {source}，但没有可用的布尔开关值 → 未做任何操作")
         return
 
     changed, deferred, failed = [], {}, []
@@ -180,8 +204,13 @@ def main() -> None:
     if failed:
         parts.append("未处理: " + "、".join(failed))
     if parts:
-        log(f"同步结果 —— {' | '.join(parts)}")
-        print(f"[zcode-tokenspeed] {' | '.join(parts)}")
+        summary = " | ".join(parts)
+        log(f"同步结果 —— {summary}")
+        print(f"[zcode-tokenspeed] {summary}")
+    else:
+        summary = f"所有已保存的开关都已与客户端一致（配置来自 {source}），无需改动"
+        log(f"同步结果 —— {summary}")
+    beat(summary)
 
 
 if __name__ == "__main__":
@@ -189,3 +218,4 @@ if __name__ == "__main__":
         main()
     except Exception as exc:  # hook 绝不能因自身异常打断会话启动
         log(f"sync 异常: {exc!r}")
+        beat(f"异常退出: {exc!r}")

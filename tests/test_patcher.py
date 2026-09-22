@@ -894,5 +894,109 @@ class TestSliderScript(unittest.TestCase):
         self.assertIn("smoke OK", r.stdout)
 
 
+class TestDoctor(unittest.TestCase):
+    """doctor.py 是「插件装了没生效」时的第一入口。它靠一批常量去定位安装目录、
+    配置键和开关表——这些常量一旦和真实实现漂移，自检报告会指向错误的目录，
+    比没有自检更误导。所以这里把它们和 plugin.json / sync.py 对齐钉死。"""
+
+    def test_plugin_name_matches_manifest(self):
+        import doctor
+        manifest = json.loads((_HERE.parent / ".zcode-plugin" / "plugin.json")
+                              .read_text(encoding="utf-8"))
+        self.assertEqual(doctor.PLUGIN_NAME, manifest["name"],
+                         "doctor 按 PLUGIN_NAME 前缀找安装目录与配置键，必须等于清单里的 name")
+
+    def test_patch_key_table_covers_every_switch(self):
+        import doctor
+        import sync
+        self.assertEqual({k for k, _label in doctor.PATCH_KEYS} | {"core_patch"},
+                         {k for k, _args, _repack in sync.PATCHES},
+                         "doctor 的开关表漏项 → 自检报告会漏掉某个功能的状态")
+
+    def test_repack_set_matches_sync(self):
+        """doctor 的结论里说「重打包级补丁需要两次启动」，这个集合必须与 sync 一致。"""
+        import doctor
+        import sync
+        self.assertEqual(doctor.REPACK_KEYS, {k for k, _a, r in sync.PATCHES if r})
+
+    def test_prefix_entries_only_matches_this_plugin(self):
+        import doctor
+        cfg = {"plugins": {
+            "options": {"zcode-tokenspeed@some-market": {"tps_footer": True},
+                        "other-plugin@m": {"x": 1}},
+            "enabledPlugins": {"zcode-tokenspeed@some-market": True},
+        }}
+        self.assertEqual(list(doctor._prefix_entries(cfg, "options")),
+                         ["zcode-tokenspeed@some-market"])
+        self.assertEqual(list(doctor._prefix_entries(cfg, "enabledPlugins")),
+                         ["zcode-tokenspeed@some-market"])
+        # 缺失 / 类型异常都不能抛异常（config.json 是用户可手改的文件）
+        self.assertEqual(doctor._prefix_entries({}, "options"), {})
+        self.assertEqual(doctor._prefix_entries({"plugins": {"options": []}}, "options"), {})
+        self.assertEqual(doctor._prefix_entries(None, "options"), {})
+
+    def test_manifest_version_reads_both_layouts(self):
+        import doctor
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".claude-plugin").mkdir()
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                json.dumps({"name": "x", "version": "1.2.3"}), encoding="utf-8")
+            self.assertEqual(doctor._manifest_version(root), "1.2.3")
+            self.assertEqual(doctor._manifest_version(root / "nope"), "?")
+
+    def test_json_mode_emits_parseable_report(self):
+        """--json 是让用户「贴给别人看」的输出，必须是合法 JSON 且包含关键字段。"""
+        import doctor
+        r = subprocess.run([sys.executable, str(doctor.__file__), "--json"],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        data = json.loads(r.stdout)
+        for key in ("python", "plugin_dirs", "enabled", "options_saved", "hook_fired"):
+            self.assertIn(key, data)
+
+
+class TestSyncHeartbeat(unittest.TestCase):
+    """心跳文件 _sync.last 是「钩子到底跑没跑」的唯一证据：
+    没拨过开关时 sync 什么都不做、日志也是空的，「钩子没触发」与「触发了但无事可做」
+    在日志里长得一模一样。所以必须保证它在任何一条提前返回的路径上都被写出来。"""
+
+    def setUp(self):
+        import sync
+        self.sync = sync
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG)
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-hb-", ignore_cleanup_errors=True)
+        d = Path(self._tmp.name)
+        sync.CONFIG = d / "config.json"       # 故意不存在
+        sync.STAMP = d / "_sync.last"
+        sync.LOG = d / "_sync.log"
+
+    def tearDown(self):
+        self.sync.CONFIG, self.sync.STAMP, self.sync.LOG = self._orig
+        self._tmp.cleanup()
+
+    def test_beat_writes_timestamp_and_message(self):
+        self.sync.beat("单元测试")
+        text = self.sync.STAMP.read_text(encoding="utf-8")
+        self.assertIn("单元测试", text)
+        self.assertRegex(text, r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+
+    def test_main_beats_when_config_is_missing(self):
+        """没有配置时 main() 提前返回——这条路径必须留下心跳，否则用户无从判断
+        到底是「钩子没跑」还是「钩子跑了但没保存过开关」。"""
+        quiet(self.sync.main)
+        text = self.sync.STAMP.read_text(encoding="utf-8")
+        self.assertIn("未做任何操作", text)
+        self.assertIn("从未保存过开关", text)
+
+    def test_main_beats_when_nothing_to_do(self):
+        """配置存在但所有开关都已一致时，也要留下心跳并写明「无需改动」。"""
+        self.sync.CONFIG.write_text(json.dumps(
+            {"plugins": {"options": {"zcode-tokenspeed@m": {}}}}), encoding="utf-8")
+        quiet(self.sync.main)
+        text = self.sync.STAMP.read_text(encoding="utf-8")
+        self.assertTrue(text.strip(), "心跳文件不能为空")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

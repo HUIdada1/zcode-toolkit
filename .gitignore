@@ -1,5 +1,6 @@
 # 运行时产物
 _sync.log
+_sync.last
 _watchdog.pid
 __pycache__/
 *.py[cod]
