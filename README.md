@@ -27,7 +27,9 @@ ZCode 桌面客户端的本地增强补丁插件:七个补丁覆盖模型思考�
 **模型拉取按钮**(`--model-puller`)——3.14.x 的界面模型列表以 `<dataBaseDir>/.zcode/v2/provider_config.json` 为唯一事实源(`dataBaseDir` 从 `~/.zcode/v2/setting.json` 解析,数据目录迁移到 F 盘等场景也能正确定位),本补丁读写时自动合并/回写新 schema 的 `personalModelIds`/`modelOrder` 与模型规则,同时保持旧 `config.json` 元数据一致;界面删除模型后再次拉取可正常重加,不再出现「已添加却写不进列表」。
 
 每个补丁都支持 `--check`(只读查状态)与 `--revert`(精确还原),互不干扰、可单独装卸。
-另有通用开关:`--dry-run`(只报告改动不写盘)、`--verbose`(打印探测细节)、`--force`(跳过备份指纹校验,慎用);
+另有通用开关:`--dry-run`(只报告改动不写盘)、`--verbose`(打印探测细节)、`--force`(跳过备份指纹校验,慎用)、
+`--prune`(清理安装目录里的补丁产物;加 `--deep` 连当前备份一起清,之后无法 `--revert`);
+每次执行结束打印「执行汇总」表(补丁 × 目标 × 成功/失败),失败项返回退出码 1;
 打补丁/还原前会预检 ZCode 进程,运行中直接拒绝(退出码 2)。
 
 **回归测试**(纯标准库 unittest,无需 pytest):
@@ -37,7 +39,7 @@ python -m unittest discover -s tests -v
 ```
 
 覆盖 asar 头解析与重打包(offset 重排、unpacked 条目)、integrity 精确同步、内核补丁的字节级改写与
-备份指纹、3.14+ 档位配置迁移与冲突跳过、注入代码语法;装了 ZCode 时还会**只读校验真实 app.asar**
+备份指纹、3.14+ 档位配置迁移与冲突跳过、注入代码语法、重打包峰值内存约束;装了 ZCode 时还会**只读校验真实 app.asar**
 的逐条目 integrity(约 2.7 万条)。CI 在 Python 3.10/3.12/3.13 上跑这套用例。
 
 ## 快速开始
@@ -47,7 +49,7 @@ python -m unittest discover -s tests -v
 **方式一:安装插件**(推荐)
 
 ```bash
-git clone https://github.com/c80361619/zCode-TokenSpeed.git
+git clone https://github.com/c80361619/zCode-Multi-functional-plugin.git
 ```
 
 然后把克隆得到的目录放入 ZCode 的插件目录(Windows 默认 `~/.zcode/plugins/`,即 `C:\Users\<用户名>\.zcode\plugins\`;数据目录迁移过的用户是 `<dataBaseDir>\.zcode\plugins\`),重启 ZCode 即完成安装。安装后在新任务里:
@@ -58,8 +60,8 @@ git clone https://github.com/c80361619/zCode-TokenSpeed.git
 **方式二:直接跑脚本**(不想装插件,手动打补丁)
 
 ```bash
-git clone https://github.com/c80361619/zCode-TokenSpeed.git
-cd zCode-TokenSpeed
+git clone https://github.com/c80361619/zCode-Multi-functional-plugin.git
+cd zCode-Multi-functional-plugin
 
 python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --check           # 只读检查(可放心先跑)
 python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer      # 打 TPS 统计条

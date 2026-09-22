@@ -1262,16 +1262,28 @@ catch(n){return{success:!1,error:String(n)}}});
     return (read_h + write_h + fetch_h).encode()
 
 
+def _read_asar_header(asar: Path):
+    """只读 asar 头（不解码数据区），返回 (header 树, 数据区起始偏移)。
+    重打包时不该把整包读进内存，所以单独提供这个轻量版本。"""
+    with open(asar, "rb") as f:
+        head = f.read(16)
+        if len(head) < 16:
+            raise ValueError(f"asar 文件过小: {asar}")
+        f0, f1, f2, f3 = struct.unpack("<4I", head)
+        if f0 != 4:
+            raise ValueError(f"asar 头格式不符（首 uint32={f0}，期望 4）: {asar}")
+        if not 0 < f3 < (1 << 28):
+            raise ValueError(f"asar 头长度异常（jsonLen={f3}）: {asar}")
+        blob = f.read(f3)
+    if len(blob) != f3:
+        raise ValueError(f"asar 头被截断: {asar}")
+    return json.loads(blob.decode("utf-8")), 8 + f1
+
+
 def _asar_header_raw(asar: Path):
     """读整个 asar：返回 (原始全量 bytes, header 树, 数据区起始偏移)。"""
-    raw = asar.read_bytes()
-    if len(raw) < 16:
-        raise ValueError(f"asar 文件过小: {asar}")
-    f0, f1, f2, f3 = struct.unpack("<4I", raw[:16])
-    if f0 != 4:
-        raise ValueError(f"asar 头格式不符（首 uint32={f0}，期望 4）: {asar}")
-    header = json.loads(raw[16:16 + f3].decode("utf-8"))
-    return raw, header, 8 + f1
+    header, data_start = _read_asar_header(asar)
+    return asar.read_bytes(), header, data_start
 
 
 def _asar_entry_bytes(raw: bytes, data_start: int, ent: dict) -> bytes:
@@ -1298,8 +1310,11 @@ def _asar_walk_entries(node, path=""):
 
 def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> int:
     """通用 asar 重打包：树中删除 remove 条目，overwrite 覆盖/新增文件数据并重算 integrity，
-    全部条目 offset 重排；写临时文件、回读校验后原子替换。返回新文件大小。"""
-    raw, header, data_start = _asar_header_raw(asar)
+    全部条目 offset 重排；写临时文件、回读校验后原子替换。返回新文件大小。
+
+    内存策略：**不把整包读进内存**——未改动条目从源文件按块流式搬运（asar 常达数百 MB，
+    原先 read_bytes() 会让峰值内存接近 2× 包体），只有被覆盖的条目在内存里。"""
+    header, data_start = _read_asar_header(asar)
 
     # overwrite 中树里尚不存在的路径（新增文件）按层级插入占位条目
     for p in overwrite:
@@ -1323,16 +1338,10 @@ def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> i
                 del files[name]
 
     purge(header, "")
-    # relayout 会改写 ent.offset，旧数据位置必须先快照（emit 二次读数据时用）
-    old_positions = {p: (int(ent["offset"]), ent["size"]) for p, ent in _asar_walk_entries(header)}
+    # relayout 会改写 ent.offset/size，源文件里的旧位置必须先快照（流式搬运时用）
+    old_positions = {p: (int(ent["offset"]), int(ent["size"]))
+                     for p, ent in _asar_walk_entries(header)}
     cursor = 0
-
-    def entry_data(p: str, ent: dict) -> bytes:
-        data = overwrite.get(p)
-        if data is None:
-            off, size = old_positions[p]
-            data = raw[data_start + off:data_start + off + size]
-        return data
 
     def relayout(node, prefix):
         nonlocal cursor
@@ -1343,12 +1352,13 @@ def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> i
             elif ent.get("unpacked"):
                 continue
             else:
-                data = entry_data(p, ent)
-                ent["size"] = len(data)
+                data = overwrite.get(p)
+                size = len(data) if data is not None else old_positions[p][1]
+                ent["size"] = size
                 ent["offset"] = str(cursor)
-                if p in overwrite:
+                if data is not None:
                     ent["integrity"] = _asar_integrity(data)
-                cursor += len(data)
+                cursor += size
 
     relayout(header, "")
     json_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1357,8 +1367,9 @@ def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> i
                    + json_bytes + b"\x00" * pad)
 
     tmp = asar.with_name(f"{asar.name}.{os.getpid()}.tmp")
+    chunk_size = 1 << 20
     try:
-        with open(tmp, "wb") as out:
+        with open(asar, "rb") as src, open(tmp, "wb") as out:
             out.write(header_blob)
 
             def emit(node, prefix):
@@ -1369,16 +1380,36 @@ def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> i
                     elif ent.get("unpacked"):
                         continue
                     else:
-                        out.write(entry_data(p, ent))
+                        data = overwrite.get(p)
+                        if data is not None:
+                            out.write(data)
+                            continue
+                        off, size = old_positions[p]
+                        src.seek(data_start + off)
+                        left = size
+                        while left > 0:            # 未改动条目：分块搬运，不进内存
+                            chunk = src.read(min(chunk_size, left))
+                            if not chunk:
+                                raise ValueError(f"源文件读取不足: {p}（还差 {left} 字节）")
+                            out.write(chunk)
+                            left -= len(chunk)
 
             emit(header, "")
 
-        v_raw, v_header, v_start = _asar_header_raw(tmp)
+        # 回读校验：只读临时文件的头，逐条比对被覆盖条目 + 校验总长度（不整包读回内存）
+        v_header, v_start = _read_asar_header(tmp)
         v_files = dict(_asar_walk_entries(v_header))
-        for p, want in overwrite.items():
-            ent = v_files.get(p)
-            if ent is None or _asar_entry_bytes(v_raw, v_start, ent) != want:
-                raise ValueError(f"重打包校验失败: {p}")
+        expect = v_start + sum(int(e["size"]) for _, e in _asar_walk_entries(v_header))
+        if tmp.stat().st_size != expect:
+            raise ValueError(f"重打包校验失败：文件长度 {tmp.stat().st_size} ≠ 期望 {expect}")
+        with open(tmp, "rb") as f:
+            for p, want in overwrite.items():
+                ent = v_files.get(p)
+                if ent is None or int(ent["size"]) != len(want):
+                    raise ValueError(f"重打包校验失败（条目缺失或长度不符）: {p}")
+                f.seek(v_start + int(ent["offset"]))
+                if f.read(len(want)) != want:
+                    raise ValueError(f"重打包校验失败（内容不符）: {p}")
         os.replace(tmp, asar)
     except BaseException:
         tmp.unlink(missing_ok=True)   # 失败/被占用都不留临时文件残留
@@ -2009,6 +2040,69 @@ def process_reasoning_config(v2_root: Path, check_only: bool, revert: bool, *,
     return True
 
 
+def _pad_display(text: str, width: int) -> str:
+    """按终端显示宽度补齐（中日韩字符占两列），让汇总表对齐。"""
+    w = sum(2 if ord(ch) > 0x2E7F else 1 for ch in text)
+    return text + " " * max(1, width - w)
+
+
+def prune_artifacts(asars: list[Path], deep: bool, dry_run: bool = False) -> int:
+    """清理补丁产物，返回回收的字节数。
+
+    默认只删「确定没用的」：`.stale-*` 归档（升级前的旧版本整包）、`*.tps-tmp` / `*.tmp` 残留。
+    `--deep` 连当前 `.bak`、sidecar 与配置备份一起删 —— **之后将无法还原**，需要重打才有记录。
+    只删本工具自己命名的文件，不碰目录里其它任何东西。"""
+    targets: list[Path] = []
+
+    def collect(folder: Path, patterns) -> None:
+        if not folder.is_dir():
+            return
+        for pat in patterns:
+            targets.extend(p for p in folder.glob(pat) if p.is_file())
+
+    for asar in asars:
+        folder = asar.parent
+        collect(folder, (f"{asar.name}*.stale-*", f"{asar.name}*.tps-tmp", f"{asar.name}.*.tmp"))
+        if deep:
+            collect(folder, (f"{asar.name}*.bak", f"{asar.name}*.bak.meta.json",
+                             f"{asar.name}*-patch.json"))
+        # 内核备份与档位配置备份（若存在）
+        collect(folder / "glm", ("zcode.cjs.bak", "zcode.cjs.bak.meta.json"))
+        if deep:
+            collect(folder / "glm", ("zcode.cjs.bak.stale-*",))
+
+    if deep:
+        v2 = _v2_root(None)
+        collect(v2, ("provider_config.json.reasoning-bak", "config.json.puller-bak",
+                     "provider_config.json.puller-bak", "provider_config.json.tmp"))
+
+    targets = sorted(set(targets))
+    if not targets:
+        print("[.] 没有可清理的补丁产物")
+        return 0
+
+    total = sum(p.stat().st_size for p in targets)
+    print(f"[*] {'将' if dry_run else ''}清理 {len(targets)} 个文件，共 {total / 1048576:.1f} MB：")
+    for p in targets:
+        print(f"      {p.name:<44} {p.stat().st_size / 1048576:>9.1f} MB")
+    if deep:
+        print("    [!] --deep 已包含当前备份与 sidecar：清理后将无法用 --revert 还原，需重打才有记录")
+    if dry_run:
+        print("    （--dry-run 未删除）")
+        return 0
+
+    freed = 0
+    for p in targets:
+        try:
+            size = p.stat().st_size
+            p.unlink()
+            freed += size
+        except OSError as e:
+            print(f"    [!] 删除失败 {p.name}: {e}")
+    print(f"[+] 已清理，回收 {freed / 1048576:.1f} MB")
+    return freed
+
+
 def _resolve_asars(target: str | None) -> list[Path]:
     asars = []
     for cjs in resolve_target(target):
@@ -2069,15 +2163,47 @@ def main() -> int:
                     help="注入模型拉取按钮：设置页「自动拉取模型」，经 preload/main IPC 读写 config，asar 重打包级")
     ap.add_argument("--puller-src", default=None,
                     help="指定注入的 zcode-model-puller.js 路径（默认用本脚本同目录自带的）")
+    ap.add_argument("--prune", action="store_true",
+                    help="清理安装目录里的补丁产物（旧版本归档 / 临时文件残留）")
+    ap.add_argument("--deep", action="store_true",
+                    help="配合 --prune：连当前 .bak 与 sidecar 一起清（之后无法 --revert，慎用）")
     args = ap.parse_args()
 
     global VERBOSE
     VERBOSE = args.verbose
 
+    # ---------- 清理产物（不涉及打补丁，不需要预检进程） ----------
+    if args.prune:
+        try:
+            asars = _resolve_asars(args.target)
+        except SystemExit as e:
+            print(e)
+            return 1
+        print(f"=== 清理补丁产物，目标 {len(asars)} 处安装"
+              f"{'（含当前备份，清理后无法 --revert）' if args.deep else '（仅归档与临时文件）'} ===")
+        try:
+            prune_artifacts(asars, args.deep, dry_run=args.dry_run)
+        except Exception as e:
+            print(f"[!] 清理失败：{type(e).__name__}: {e}")
+            return 1
+        return 0
+
     asar_flags = any((args.usage_chart, args.model_width, args.tps_footer,
                       args.thought_slider, args.model_puller))
     mode = "检查" if args.check else ("还原" if args.revert else ("预演" if args.dry_run else "打补丁"))
     fails: list[str] = []
+    results: list[tuple[str, str, bool]] = []      # (补丁名, 目标, 是否成功)
+
+    def run_step(title: str, target: Path, fn) -> None:
+        """统一执行 + 记录结果：任何异常都收敛成「失败」，不把裸堆栈甩给用户。"""
+        try:
+            ok = bool(fn(target))
+        except Exception as e:
+            print(f"[!] {target}\n    执行失败：{type(e).__name__}: {e}")
+            ok = False
+        results.append((title, str(target), ok))
+        if not ok:
+            fails.append(f"{title} @ {target}")
 
     # ---------- 预检：运行中一律不打补丁（asar 被锁、配置会被回写） ----------
     if (asar_flags or args.reasoning_config) and not args.check and not args.dry_run:
@@ -2119,22 +2245,14 @@ def main() -> int:
                 continue
             print(f"=== {title}，目标 {len(asars)} 处，模式：{mode} ===")
             for a in asars:
-                try:
-                    if not fn(a):
-                        fails.append(f"{title} @ {a}")
-                except Exception as e:                      # 兜底：不把裸堆栈甩给用户
-                    print(f"[!] {a}\n    执行失败：{type(e).__name__}: {e}")
-                    fails.append(f"{title} @ {a}")
+                run_step(title, a, fn)
 
     if args.reasoning_config:
+        v2 = _v2_root(args.v2_root)
         print(f"=== 3.14+ 原生档位配置（provider_config.json），模式：{mode} ===")
-        try:
-            if not process_reasoning_config(_v2_root(args.v2_root), args.check, args.revert,
-                                            dry_run=args.dry_run):
-                fails.append("3.14+ 原生档位配置")
-        except Exception as e:
-            print(f"[!] 执行失败：{type(e).__name__}: {e}")
-            fails.append("3.14+ 原生档位配置")
+        run_step("3.14+ 原生档位配置", v2,
+                 lambda _t: process_reasoning_config(v2, args.check, args.revert,
+                                                     dry_run=args.dry_run))
 
     if not asar_flags and not args.reasoning_config:
         targets = resolve_target(args.target)
@@ -2156,13 +2274,18 @@ def main() -> int:
             pass
         print(f"=== 客户端版本 {version or '未知'} | 探测到 {len(targets)} 处安装 | 模式：{mode} ===")
         for t in targets:
-            try:
-                if not process(t, args.check, args.revert,
-                               dry_run=args.dry_run, force=args.force, version=version):
-                    fails.append(f"思维强度内核补丁 @ {t}")
-            except Exception as e:
-                print(f"[!] {t}\n    执行失败：{type(e).__name__}: {e}")
-                fails.append(f"思维强度内核补丁 @ {t}")
+            run_step("思维强度内核补丁", t,
+                     lambda tt: process(tt, args.check, args.revert, dry_run=args.dry_run,
+                                        force=args.force, version=version))
+
+    if results:
+        print(f"\n=== 执行汇总（模式：{mode}）===")
+        for title, target, ok in results:
+            p_ = Path(target)
+            shown = target if p_.is_dir() else p_.name
+            print(f"  {'✓' if ok else '✗'} {_pad_display(title, 22)}{shown}")
+        ok_n = sum(1 for *_, ok in results if ok)
+        print(f"  合计 {len(results)} 项：成功 {ok_n}，失败 {len(results) - ok_n}")
 
     if not args.check and not args.revert and not args.dry_run:
         print("=== 提示：完全退出并重启 ZCode 后生效；升级后需重新执行本脚本 ===")

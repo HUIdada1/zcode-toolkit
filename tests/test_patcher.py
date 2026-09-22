@@ -93,7 +93,8 @@ def make_cjs(anchor: str, prefix: str = "/*pre*/", suffix: str = "/*post*/",
 
 class TempCase(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-test-")
+        # Windows 上临时目录偶尔会被索引/杀软短暂占用，cleanup 失败不该让测试变红
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-test-", ignore_cleanup_errors=True)
         self.tmp = Path(self._tmp.name)
 
     def tearDown(self):
@@ -232,6 +233,81 @@ class TestIntegritySync(TempCase):
         before = self.asar.read_bytes()
         quiet(zp._asar_sync_integrity, self.asar, "target.js", b"zzz", dry_run=True)
         self.assertEqual(self.asar.read_bytes(), before)
+
+
+class TestRepackMemory(TempCase):
+    """重打包不该把整包读进内存——真实 app.asar 三百多 MB，整包读入会让峰值接近 2× 包体。"""
+
+    def setUp(self):
+        super().setUp()
+        self.big = b"x" * (3 * 1024 * 1024)          # 单条 3MB，跨多个 1MB 搬运块
+        self.files = {"big.bin": self.big, "out/renderer/index.html": b"<html></html>"}
+        for i in range(12):
+            self.files[f"pad/{i}.bin"] = bytes([65 + i]) * (3 * 1024 * 1024)
+        self.asar = self.tmp / "app.asar"
+        build_asar(self.asar, self.files)
+
+    def test_peak_memory_far_below_package_size(self):
+        import tracemalloc
+        size = self.asar.stat().st_size
+        self.assertGreater(size, 30 * 1024 * 1024, "夹具太小，测不出内存行为")
+
+        tracemalloc.start()
+        zp._repack_asar(self.asar, {"out/renderer/index.html": b"z" * 1000}, set())
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        self.assertLess(peak, size // 3,
+                        f"峰值 {peak / 1048576:.1f}MB 相对包体 {size / 1048576:.1f}MB 过大")
+
+    def test_large_entries_survive_chunked_copy(self):
+        zp._repack_asar(self.asar, {"out/renderer/index.html": b"z" * 1000}, set())
+        self.assertEqual(read_entry(self.asar, "big.bin"), self.big)
+        for i in (0, 5, 11):
+            self.assertEqual(read_entry(self.asar, f"pad/{i}.bin"), self.files[f"pad/{i}.bin"])
+        self.assertEqual(read_entry(self.asar, "out/renderer/index.html"), b"z" * 1000)
+
+
+class TestPrune(TempCase):
+    """--prune 只清理本工具自己的产物：默认不碰当前备份与 sidecar，也绝不碰邻居文件。"""
+
+    def setUp(self):
+        super().setUp()
+        self.asar = self.tmp / "app.asar"
+        build_asar(self.asar, {"a.js": b"aaaa"})
+        for name in ("app.asar.tps.bak", "app.asar.tps.bak.meta.json",
+                     "app.asar.chart-patch.json",
+                     "app.asar.puller.bak.stale-20260101-000000",
+                     "app.asar.123.tmp", "app.asar.tps-tmp",
+                     "unrelated.txt", "app.asar.old", "app.asarfoo"):
+            (self.tmp / name).write_bytes(b"x" * 10)
+
+    def names(self):
+        return {p.name for p in self.tmp.iterdir()}
+
+    def test_default_prune_only_archives_and_temps(self):
+        quiet(zp.prune_artifacts, [self.asar], False)
+        left = self.names()
+        for keep in ("app.asar.tps.bak", "app.asar.chart-patch.json",
+                     "unrelated.txt", "app.asar.old", "app.asarfoo", "app.asar"):
+            self.assertIn(keep, left, f"{keep} 不该被删")
+        for gone in ("app.asar.puller.bak.stale-20260101-000000",
+                     "app.asar.123.tmp", "app.asar.tps-tmp"):
+            self.assertNotIn(gone, left, f"{gone} 应被清理")
+
+    def test_deep_prune_also_removes_backups_and_sidecars(self):
+        quiet(zp.prune_artifacts, [self.asar], True)
+        left = self.names()
+        for gone in ("app.asar.tps.bak", "app.asar.tps.bak.meta.json",
+                     "app.asar.chart-patch.json"):
+            self.assertNotIn(gone, left, f"{gone} 应被 --deep 清理")
+        self.assertIn("app.asar", left, "包本体不能删")
+        self.assertIn("unrelated.txt", left)
+
+    def test_dry_run_keeps_everything(self):
+        quiet(zp.prune_artifacts, [self.asar], True, True)
+        self.assertTrue((self.tmp / "app.asar.tps.bak").exists())
+        self.assertTrue((self.tmp / "app.asar.123.tmp").exists())
 
 
 # ------------------------------------------------------------------ 内核补丁（≤3.11）

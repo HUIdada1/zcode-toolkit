@@ -36,7 +36,9 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
   模型同时出现在两个规则列表，重复声明会让整份供应商配置降级为空。
 - `model_pull.py` 与 `zcode-model-puller.js` 已适配新格式：拉取模型时直接写 `optionSpecs`，`--refresh` 会把旧 `reasoning` 条目迁移过来。
 - 通用开关（所有补丁适用）：`--dry-run` 只报告改动不写盘 · `--verbose` 打印安装探测细节 ·
-  `--force` 跳过备份指纹校验（慎用）。
+  `--force` 跳过备份指纹校验（慎用）· `--prune` 清理安装目录里的补丁产物
+  （`--prune --deep` 连当前 `.bak` 与 sidecar 一起清，之后无法 `--revert`，需重打才有记录）。
+  每次执行结束会打印「执行汇总」表（补丁 × 目标 × 成功/失败），失败项返回退出码 1。
 - **打补丁/还原前会预检 ZCode 进程**：运行中直接拒绝（退出码 2）。只读 `--check` 与 `--dry-run` 不受限。
 - 备份带**版本指纹**（`*.bak.meta.json`）：客户端升级后旧备份自动归档（改名 `.stale-<时间>`），
   还原时若当前文件与备份不是同一版本会**拒绝执行**，避免把旧内核/asar 盖回新客户端。
@@ -155,7 +157,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 - 关键文件相对安装根目录固定：`resources/glm/zcode.cjs`（内核）、`resources/app.asar`（桌面端资源包）
 - Python ≥ 3.10，用系统可用的 `python3`/`python` 即可，脚本仅用标准库
 - 改动脚本后先跑回归测试：`python -m unittest discover -s tests -v`（纯标准库；含 asar 重打包往返、
-  备份指纹、档位配置迁移、注入代码语法等 39 个用例；本机装了 ZCode 时还会只读校验真实 asar 的 integrity）
+  备份指纹、档位配置迁移、注入代码语法、峰值内存约束等 44 个用例；本机装了 ZCode 时还会只读校验真实 asar 的 integrity）
 - Program Files / /Applications 类目录可能需要管理员/sudo 权限
 - 执行 AI 可按上述规则自行定位安装（如 `ls /Applications`、查运行中进程的 exe 路径）
 
