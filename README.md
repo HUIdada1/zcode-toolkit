@@ -29,23 +29,47 @@ ZCode 桌面客户端的本地增强补丁插件:六个补丁覆盖模型思考�
 
 **方式一:安装插件**(推荐)
 
-把本仓库放入 ZCode 插件目录,或用插件市场安装。安装后在新任务里:
+```bash
+git clone https://github.com/c80361619/zCode-TokenSpeed.git
+```
+
+然后把克隆得到的目录放入 ZCode 的插件目录(Windows 默认 `~/.zcode/plugins/`,即 `C:\Users\<用户名>\.zcode\plugins\`;数据目录迁移过的用户是 `<dataBaseDir>\.zcode\plugins\`),重启 ZCode 即完成安装。安装后在新任务里:
 
 - 用斜杠命令:`/zcode-patch-status`(只读检查)、`/zcode-patch-apply`(注入)、`/zcode-patch-revert`(还原)、`/zcode-patch-toggle`(逐项开关);
 - 或直接点名「zcode-tokenspeed」说明要哪个功能。
 
-**方式二:直接跑脚本**
+**方式二:直接跑脚本**(不想装插件,手动打补丁)
 
 ```bash
+git clone https://github.com/c80361619/zCode-TokenSpeed.git
+cd zCode-TokenSpeed
+
 python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --check           # 只读检查(可放心先跑)
 python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer      # 打 TPS 统计条
 python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --thought-slider  # 打思考强度滑条
+python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --model-puller    # 打模型拉取按钮
 python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer --revert   # 还原
 ```
 
 安装位置自动探测(运行中进程 → 注册表 → 常见目录),也可显式传参:`python zcode_patcher.py "D:\ZCode"`。
 
-> 重打包级补丁(TPS / 滑条 / 拉取按钮)在 ZCode 运行中会被文件锁挡住,**打补丁前完全退出 ZCode**,打完重启生效。每个补丁首次执行自动生成整包备份(`.bak`)与逐字节记录(sidecar json),还原精确到字节。
+> 重打包级补丁(TPS / 滑条 / 拉取按钮)在 ZCode 运行中会被文件锁挡住,**打补丁前完全退出 ZCode**(托盘右键退出,不是关窗口),打完重启生效。每个补丁首次执行自动生成整包备份(`.bak`)与逐字节记录(sidecar json),还原精确到字节。
+
+## 打完补丁后怎么用
+
+| 补丁 | 在哪里用 |
+|---|---|
+| TPS 状态栏 | 打开任意会话,输入框下方自动出现统计条;**右键**它可切换「输入框工具栏 / 会话顶部 sticky」位置 |
+| 思考强度滑条 | 输入框工具栏的「思考 · 档名」入口(原生下拉已被替换),点击弹出拖拽条,拖到目标档位松手即生效;←/→ 键可微调 |
+| 模型拉取按钮 | 「设置 → 模型供应商」新建/编辑自定义供应商,填好 **Base URL 和 API Key** 后,点旁边的「⚡️ 自动拉取模型」→ 弹窗里勾选要的模型(新模型默认勾选,已添加的标注「已添加」)→ 点「确认添加并保存」,模型立即出现在列表 |
+| 用量页去截断 / 模型弹窗加宽 | 无需操作,重启 ZCode 后自动生效 |
+
+**模型拉取的典型流程**(第一次添加供应商):
+
+1. 设置 → 模型供应商 → 添加自定义供应商;
+2. 填名称、Base URL(如 `https://api.example.com/v1`)、API Key;
+3. 点「⚡️ 自动拉取模型」——**不用先保存供应商**,补丁会自动创建条目并判定 API 协议;
+4. 弹窗勾选模型 → 确认 → 模型列表即刻出现,聊天输入框里就能选到。
 
 ## 插件开关
 
@@ -85,6 +109,26 @@ commands/                                    /zcode-patch-status / apply / rever
 | Linux | ✅ 逻辑支持 | 探测 `/opt`、`/usr/share` |
 
 对未知版本 / 未知结构,脚本一律拒绝盲改并报告原因,不会写坏文件。开发与实测基于 **ZCode 3.11.2 / 3.14.1(Windows)**;3.14.x 起界面供应商列表由 `<dataBaseDir>/.zcode/v2/provider_config.json` 驱动,模型拉取补丁与 CLI 已同步适配,旧版客户端不受影响。
+
+## 常见问题(FAQ)
+
+**Q:补丁打了但界面没变化?**
+确认两点:① 打补丁时 ZCode 是否完全退出(运行中会被文件锁挡住,命令会报「文件被占用」);② 打完后是否重启了 ZCode。可用 `--check` 查看各补丁状态。
+
+**Q:点「自动拉取模型」提示拉取失败?**
+检查 Base URL 是否可直接访问 `<baseURL>/models`(部分网关要求 Key,补丁会自动带上表单里的 Key);URL 结尾带不带 `/v1` 都可以,补丁会自动尝试多种路径组合。
+
+**Q:拉取成功但模型列表里没有?**
+确认用的是最新版代码(2026-09-22 之后的提交修复了 3.14.x 的 `provider_config.json` 适配);旧版脚本在新版客户端上会出现「写入成功但界面不显示」。重跑 `--model-puller` 更新注入即可,无需先还原。
+
+**Q:供应商列表全部消失?**
+查看 `<dataBaseDir>/.zcode/v2/logs/` 最新日志,若出现「Personal Provider Config 加载失败」,说明配置文件被旧版脚本写坏(内置供应商污染或智能/手动规则冲突)。用 `provider_config.json.puller-bak` 或同目录 `.conflict-bak*` 备份覆盖回去,再重启 ZCode;并确保补丁已更新到最新版。
+
+**Q:ZCode 升级后补丁失效?**
+升级会覆盖 `app.asar`,重跑对应补丁命令即可(内核补丁可用 `--extract` 自动提取新版本锚点)。
+
+**Q:想全部还原?**
+逐个 `--revert`,或用 `restore_clean.py` 从干净备份整包恢复(客户端异常时无需重装 ZCode)。
 
 ## License
 
