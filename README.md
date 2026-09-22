@@ -42,7 +42,7 @@ python skills/zcode-tokenspeed/scripts/model_pull.py --all [--dry-run] [--refres
 ### 方式一：作为 ZCode 插件（推荐）
 
 ```bash
-git clone https://github.com/c80361619/zCode-Multi-functional-plugin..git zcode-tokenspeed
+git clone https://github.com/c80361619/zcode-toolkit.git
 ```
 
 把克隆得到的目录放进 ZCode 的插件目录，重启 ZCode 即可：
