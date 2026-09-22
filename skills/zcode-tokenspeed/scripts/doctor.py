@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-tokenspeed 安装自检（doctor）——只读，不改任何文件。
+r"""zcode-tokenspeed 安装自检（doctor）——只读，不改任何文件。
 
 用途：在「插件装了但功能没生效」时，一条命令跑出完整链路诊断：
 
-    python doctor.py
+    python doctor.py            # 完整体检
+    python doctor.py --where    # 只打印「插件装在哪」以及扫过哪些目录
+    python doctor.py --json     # 机器可读输出
+
+⚠️ 相对路径是相对**当前所在目录**解析的。请在**克隆下来的仓库**里跑，
+   或者用绝对路径：
+       python "%USERPROFILE%\zcode-toolkit\skills\zcode-tokenspeed\scripts\doctor.py"
+   （macOS / Linux：`python3 ~/zcode-toolkit/skills/zcode-tokenspeed/scripts/doctor.py`）
+   若想直接跑**已安装的那份**，先 `doctor.py --where` 看命中路径 —— 注意 GitHub 来源
+   的市场是 `cli/plugins/cache/<市场名>/<插件名>/<版本>/`，脚本在版本目录里面。
 
 它会按顺序检查并打印结论：
   1. Python 环境（版本 / 解释器路径 / 是否满足 3.10+）
@@ -98,10 +107,12 @@ def _find_configs() -> list[Path]:
 def _installed_plugin_dirs() -> list[Path]:
     """找出本插件实际安装在哪。
 
-    **不能只按 `<市场>/<插件名>/` 去找**：`source: "./"` 的市场（插件与市场同仓库，
-    比如本仓库）其插件根就是**市场目录本身**，根本没有同名子目录；
-    而 `source: "./plugins/x"` 的市场又会多出一层。所以这里改成「按清单里的 name 认」——
-    把候选目录都扫一遍，谁的 plugin.json 里 name 匹配就是它。
+    插件副本有三套落点，**都不能靠目录名硬猜**：
+      * `<数据>/cli/plugins/marketplaces/<市场 id>/`         —— directory 来源的市场：市场根即插件根
+      * `<数据>/cli/plugins/cache/<市场名>/<插件名>/<版本>/`  —— GitHub/URL 来源：**插件根在版本目录里**
+      * `<数据>/cli/plugins/cache/<市场名>/plugins/<插件名>/` —— 市场仓库里带 plugins/ 子目录时
+    所以这里改成「按清单里的 name 认」——把候选目录都扫一遍，
+    谁的 plugin.json 里 name 匹配就是它。
     """
     found: list[Path] = []
     for cand in _candidate_roots():
@@ -173,16 +184,86 @@ def _read_manifest(root: Path) -> dict | None:
 
 
 def _prefix_entries(cfg, section: str) -> dict:
-    """取 config.json 里 plugins.<section> 下键名以插件名开头的条目。"""
+    """取 config.json 里 plugins.<section> 下属于本插件的条目。
+
+    键的格式是 `<插件名>@<市场名>`（实测 `computer-use@zcode-plugins-official`）。
+    只认 `<插件名>@…`，不要用裸 startswith —— 否则 `zcode-tokenspeed-legacy@m`
+    这种别的插件会被误算进来。
+    """
     block = ((cfg or {}).get("plugins") or {}).get(section) or {}
     if not isinstance(block, dict):
         return {}
-    return {k: v for k, v in block.items() if str(k).startswith(PLUGIN_NAME)}
+    return {k: v for k, v in block.items()
+            if str(k) == PLUGIN_NAME or str(k).startswith(PLUGIN_NAME + "@")}
 
 
 def _manifest_version(root: Path) -> str:
     m = _read_manifest(root)
     return str(m["version"]) if m and m.get("version") else "?"
+
+
+def _mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def print_where(verbose: bool = False) -> int:
+    """只打印「插件到底装在哪」——命中本插件的目录，以及可直接复制的命令。
+
+    专治「照着 README 敲命令却报 No such file or directory」：
+    命令行的相对路径是相对**当前目录**解析的，而插件的真实根目录往往比用户以为的深一层
+    （GitHub 来源的市场是 `cache/<市场名>/<插件名>/<版本>/`）。
+    这个模式把命中结果直接摊开，用户一眼就能看到该用哪个绝对路径。
+
+    默认**只列命中项**：本机实测候选目录有 120 个（别的市场/插件一大堆），
+    全列出来会把答案淹没。想看全量加 `--where-all`。
+    """
+    hr("插件位置扫描（--where）")
+    roots = _candidate_roots()
+    print(f"{INFO} 数据目录候选：")
+    for r in _storage_roots():
+        print(f"        {r}{'' if r.is_dir() else '   (不存在)'}")
+
+    hits: list[Path] = []
+    others: list[tuple[Path, str]] = []
+    for c in roots:
+        m = _read_manifest(c)
+        if m and m.get("name") == PLUGIN_NAME:
+            hits.append(c)
+        elif m:
+            others.append((c, str(m.get("name"))))
+
+    if hits:
+        print(f"\n{OK} 命中 {len(hits)} 份 {PLUGIN_NAME} 副本"
+              f"（候选目录共 {len(roots)} 个，其余 {len(others)} 个是别的插件）：")
+        for c in hits:
+            print(f"    {c}")
+            print(f"        清单版本 {_manifest_version(c)}"
+                  f"   脚本目录 {c / 'skills' / PLUGIN_NAME / 'scripts'}")
+        print(f"\n{INFO} 直接用绝对路径跑完整自检（复制下面这条）：")
+        print(f'       python "{hits[0] / "skills" / PLUGIN_NAME / "scripts" / "doctor.py"}"')
+        print(f"{INFO} 注意：GitHub 来源的市场缓存成 cache/<市场名>/<插件名>/<版本>/，")
+        print("       脚本在**版本目录**里面 —— 站在 cache/<市场名> 这一层是找不到 skills/ 的。")
+    else:
+        print(f"\n{BAD} 没有任何候选目录的清单 name == {PLUGIN_NAME} —— 插件没装成功")
+        print(f"       → 「设置 → 插件 → 创建 → 添加插件市场」填 {REPO_NAME}，再点安装")
+
+    if verbose or not hits:
+        label = "全部候选目录" if verbose else "扫过的候选目录（供你确认路径拼写）"
+        print(f"\n{INFO} {label}（共 {len(roots)} 个）：")
+        for c in roots:
+            m = _read_manifest(c)
+            if m and m.get("name") == PLUGIN_NAME:
+                print(f"{OK} {c}")
+            elif m:
+                print(f"    {c}   （其它插件：{m.get('name')}）")
+            else:
+                print(f"    {c}")
+    elif not verbose:
+        print(f"\n{INFO} 想看扫过的全部 {len(roots)} 个候选目录：`doctor.py --where-all`")
+    return 0
 
 
 def _enabled_state() -> bool:
@@ -271,14 +352,21 @@ def check_plugin() -> tuple[bool, list[Path], bool]:
     hr("4. 插件安装与启用")
     dirs = _installed_plugin_dirs()
     if not dirs:
-        print(f"{BAD} 没有找到已安装的插件目录")
-        print(f"       预期位置：<数据目录>/cli/plugins/marketplaces/<市场>/{PLUGIN_NAME}/")
+        print(f"{BAD} 没有找到已安装的插件目录（按清单里的 name 认，扫过 "
+              f"{len(_candidate_roots())} 个候选目录）")
+        print("       常见落点：")
+        print("         <数据>/cli/plugins/cache/<市场名>/<插件名>/<版本>/    ← GitHub/URL 市场")
+        print("         <数据>/cli/plugins/marketplaces/<市场 id>/            ← 本地目录市场")
         print(f"       → 「设置 → 插件 → 创建 → 添加插件市场」添加 {REPO_NAME} 后安装")
+        print("       → 或直接跑 `doctor.py --where` 看它到底扫了哪些目录")
         return False, [], False
 
     for d in dirs:
         print(f"{OK} 安装位置：{d}")
         print(f"{INFO} 清单版本：{_manifest_version(d)}")
+    if len(dirs) > 1:
+        newest = max(dirs, key=_mtime)
+        print(f"{WARN} 发现 {len(dirs)} 份副本；ZCode 一般加载最新的一份：{newest}")
 
     cfgs = _find_configs()
     if not cfgs:
@@ -474,7 +562,14 @@ def verdict(py_ok: bool, zcode_ok: bool, has_plugin: bool, enabled: bool,
 def main() -> int:
     ap = argparse.ArgumentParser(description="zcode-tokenspeed 安装自检（只读，不改任何文件）")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出（便于贴给别人看）")
+    ap.add_argument("--where", action="store_true",
+                    help="只打印扫描到的插件目录，排查「插件到底装在哪」")
+    ap.add_argument("--where-all", action="store_true",
+                    help="配合 --where：把扫过的全部候选目录都列出来（默认只列命中项）")
     args = ap.parse_args()
+
+    if args.where or args.where_all:
+        return print_where(verbose=args.where_all)
 
     dirs = _installed_plugin_dirs()
     enabled = _enabled_state()

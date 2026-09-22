@@ -22,7 +22,16 @@ python "<skill目录>/scripts/zcode_patcher.py" --all --check
 ```bash
 python "<skill目录>/scripts/doctor.py"          # 可读报告
 python "<skill目录>/scripts/doctor.py" --json   # 结构化输出，便于贴给别人
+python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+ 可直接复制的绝对路径
 ```
+
+> **别站在插件的缓存目录里敲相对路径**——用户最常踩的坑，报错长这样：
+> `can't open file '...\.zcode\cli\plugins\cache\zcode-toolkit\skills\...\doctor.py'`。
+> `cache\<市场名>\` 是**市场目录**，插件根在更深一层：GitHub 来源的市场缓存成
+> **`cache\<市场名>\<插件名>\<版本>\`**，`skills\` 在**版本目录里面**。
+> 找不到时：`--where` 列命中路径；或用系统命令搜
+> （PowerShell `Get-ChildItem "$env:USERPROFILE\.zcode\cli\plugins" -Recurse -Filter doctor.py`；
+> macOS/Linux `find ~/.zcode/cli/plugins -name doctor.py`）。
 
 插件这条路要过「安装 → 启用 → 保存配置 → 钩子触发 → 打补丁」五关，任何一关没走通，
 界面上的表现都一样是「什么也没发生」。**最常见的两个卡点是「插件没启用」与「配置没保存过」**——
@@ -100,7 +109,17 @@ python "<skill目录>/scripts/doctor.py" --json   # 结构化输出，便于贴�
 - 日志与心跳：`scripts/_sync.log`（同步日志）、`scripts/_sync.last`（每次被调用都刷新，
   证明「钩子到底跑没跑」）。没找到配置时会记录 `config.json` 里 `plugins` 的实际键名。
 - 一键自检：`python scripts/doctor.py`（只读）——插件是否安装/启用、配置是否保存过、
-  钩子是否跑过、八项补丁状态，末尾直接给卡点结论。
+  钩子是否跑过、八项补丁状态，末尾直接给卡点结论。`--where` 只查安装位置，
+  `--where-all` 连扫过的全部候选目录一起列（本机 120 个，默认只列命中项）。
+- **插件副本的三种落点**（判断「装没装」要**按清单里的 name 认**，不能靠目录名）：
+  - `<数据>/cli/plugins/marketplaces/<市场 id>/` —— directory 来源；`source: "./"` 时**市场根即插件根**
+  - `<数据>/cli/plugins/cache/<市场名>/<插件名>/<版本>/` —— GitHub/URL 来源，**插件根在版本目录里**
+    （实测 `cache/zcode-plugins-official/computer-use/0.5.13/.zcode-plugin/plugin.json`）
+  - `<数据>/cli/plugins/cache/<市场名>/plugins/<插件名>/` —— 市场仓库里带 `plugins/` 子目录时
+  - **缓存会堆积多个历史版本**（本机 `dev-default-22da16fd/zcode-patcher/` 下有 0.1.0/0.1.1/0.2.0/0.2.1），
+    所以自检会报出全部命中项并按 mtime 提示最新的那份。
+- **配置键格式是 `<插件名>@<市场名>`**（实测 `computer-use@zcode-plugins-official`）——
+  匹配时只认 `<插件名>@…`，别用裸 `startswith`。
 
 ### 钩子机制要点（官方 `diagnosing-hooks` skill + 内核实测）
 

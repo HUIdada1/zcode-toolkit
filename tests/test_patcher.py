@@ -1114,6 +1114,107 @@ class TestDoctorDiscovery(unittest.TestCase):
             import doctor
             self.assertEqual(doctor._manifest_version(root), "1.2.3")
 
+    def test_finds_plugin_in_cache_version_dir(self):
+        """用户机器上的真实落点：GitHub 来源的市场被缓存成
+        `cache/<市场名>/<插件名>/<版本>/` —— 插件根在**版本目录**里。
+
+        实测本机 `cache/zcode-plugins-official/computer-use/0.5.13/.zcode-plugin/plugin.json`。
+        用户从 `cache/zcode-toolkit` 敲 `python skills/.../doctor.py` 报 No such file，
+        就是因为那一层是**市场目录**，根本没有 skills/。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            root = (storage / "cli" / "plugins" / "cache"
+                    / "zcode-toolkit" / "zcode-tokenspeed" / "0.5.2")
+            self._make_plugin(root, "0.5.2")
+            self.assertEqual(self._with_storage(storage), [root])
+
+    def test_cache_dir_itself_is_not_a_plugin_root(self):
+        """市场目录那一层（`cache/zcode-toolkit`）不该被认成插件根。"""
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            market = storage / "cli" / "plugins" / "cache" / "zcode-toolkit"
+            (market / "zcode-tokenspeed" / "0.5.2").mkdir(parents=True)
+            self.assertEqual(self._with_storage(storage), [])
+
+    def test_multiple_cached_versions_all_found(self):
+        """缓存里会堆积多个版本（本机实测 4 个 zcode-patcher），要全都报出来。"""
+        import doctor
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            base = storage / "cli" / "plugins" / "cache" / "m" / "zcode-tokenspeed"
+            for v in ("0.5.1", "0.5.2"):
+                self._make_plugin(base / v, v)
+            found = self._with_storage(storage)
+            self.assertEqual(len(found), 2)
+            self.assertEqual(sorted(doctor._manifest_version(p) for p in found),
+                             ["0.5.1", "0.5.2"])
+
+    def _capture_where(self, storage: Path, verbose: bool = False) -> str:
+        """跑一次 --where 并把它打印的内容抓回来。"""
+        import doctor
+        orig = doctor._storage_roots
+        doctor._storage_roots = lambda: [storage]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = doctor.print_where(verbose=verbose)
+        finally:
+            doctor._storage_roots = orig
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def test_where_mode_lists_hits_and_prints_usable_command(self):
+        """`--where` 存在的意义：用户照着 README 敲相对路径失败时，一条命令
+        告诉他脚本到底在哪、以及该用哪个绝对路径。
+
+        默认**只列命中项**：本机实测候选目录有 120 个（claude-plugins-official 一家
+        就几十个插件），全列出来会把答案淹没。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            root = (storage / "cli" / "plugins" / "cache"
+                    / "zcode-toolkit" / "zcode-tokenspeed" / "0.5.2")
+            self._make_plugin(root, "0.5.2")
+            # 一堆噪声：别的插件不该出现在默认输出里
+            for n in ("android-emulator", "browser-use", "computer-use"):
+                other = storage / "cli" / "plugins" / "cache" / "zcode-plugins-official" / n / "0.1.0"
+                (other / ".zcode-plugin").mkdir(parents=True)
+                (other / ".zcode-plugin" / "plugin.json").write_text(
+                    json.dumps({"name": n, "version": "0.1.0"}), encoding="utf-8")
+            out = self._capture_where(storage)
+            self.assertIn(str(root), out)
+            self.assertIn("0.5.2", out)
+            self.assertIn("doctor.py", out)          # 给出了可直接复制的命令
+            self.assertIn(str(Path("skills") / "zcode-tokenspeed" / "scripts"), out)
+            self.assertNotIn("browser-use", out)     # 默认不列别人的插件
+            self.assertIn("--where-all", out)        # 想看全量时告诉用户怎么开
+
+    def test_where_all_lists_every_candidate(self):
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            other = storage / "cli" / "plugins" / "cache" / "zcode-plugins-official" / "browser-use" / "0.1.0"
+            (other / ".zcode-plugin").mkdir(parents=True)
+            (other / ".zcode-plugin" / "plugin.json").write_text(
+                json.dumps({"name": "browser-use", "version": "0.1.0"}), encoding="utf-8")
+            out = self._capture_where(storage, verbose=True)
+            self.assertIn("browser-use", out)
+
+    def test_where_mode_says_not_installed_when_no_hit(self):
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            (storage / "cli" / "plugins" / "cache" / "m" / "other" / "1.0.0").mkdir(parents=True)
+            out = self._capture_where(storage)
+            self.assertIn("没装成功", out)
+
+    def test_where_flag_is_wired_into_cli(self):
+        """--where 必须真能从命令行跑通（check_plugin 的提示里已经写了它）。"""
+        import doctor
+        r = subprocess.run([sys.executable, str(doctor.__file__), "--where"],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        self.assertIn("插件位置扫描", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

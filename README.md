@@ -27,7 +27,7 @@
 > **两步走，别只重启一次。** 用量页、弹窗宽度、思考档位属于字节级改动，第一次重启就生效；
 > 而状态栏 / 滑条 / 增强提示词 / 拉取按钮要改写整包，必须等 ZCode **完全退出**后由插件改写
 > `app.asar`，所以「退出 → 启动 → 再退出 → 再启动」才会看到它们。
-> 拿不准卡在哪一步，直接跑自检：`python skills/zcode-tokenspeed/scripts/doctor.py`。
+> 拿不准卡在哪一步，别猜 —— 跑一次自检就能定位：[装了没生效？先跑自检](#装了没生效先跑自检)。
 
 只想用命令行、不装插件？跳到 [方式 C](#方式-c只用命令行不装插件)。
 
@@ -242,20 +242,73 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py "/opt/ZCode"            
 ## 装了没生效？先跑自检
 
 插件这条路要经过「安装 → 启用 → 保存配置 → 钩子触发 → 打补丁」五道关，任何一道没走通，
-**表现都是「什么也没发生」**，光看界面分不出卡在哪。所以别猜，直接跑自检：
+**表现都是「什么也没发生」**，光看界面分不出卡在哪。所以别猜，直接跑自检（**只读**，不改任何文件）。
+
+### 第一步：把自检脚本跑起来
+
+`doctor.py` 是**仓库里的文件**，不是插件安装出来的命令 —— 所以要先把仓库拉下来：
 
 ```bash
-# 在仓库根目录（或插件安装目录）执行；只读，不会修改任何文件
-python skills/zcode-tokenspeed/scripts/doctor.py
+git clone https://github.com/c80361619/zcode-toolkit
+cd zcode-toolkit
+python skills/zcode-tokenspeed/scripts/doctor.py      # macOS / Linux 用 python3
 ```
 
-它会把整条链路逐项打出来，并在末尾给出结论，例如：
+> **别站在插件的缓存目录里敲相对路径。** 下面这种写法一定会失败：
+>
+> ```
+> C:\Users\你\.zcode\cli\plugins\cache\zcode-toolkit>python skills/zcode-tokenspeed/scripts/doctor.py
+> python: can't open file 'C:\Users\你\.zcode\cli\plugins\cache\zcode-toolkit\skills\zcode-tokenspeed\scripts\doctor.py': [Errno 2] No such file or directory
+> ```
+>
+> 原因：`cache\<市场名>\` 这一层是**市场目录**，插件根在更深一层。GitHub 来源的市场缓存成
+> **`cache\<市场名>\<插件名>\<版本>\`**，`skills\` 在**版本目录里面**（本机实测：
+> `cache\zcode-plugins-official\computer-use\0.5.13\.zcode-plugin\plugin.json`）。
+> 相对路径是相对**当前目录**解析的，站在市场目录那层当然找不到 `skills\`。
+
+已经在仓库里，或者想直接跑**已安装的那份副本**，先问一下它装在哪：
+
+```bash
+python skills/zcode-tokenspeed/scripts/doctor.py --where       # 只打印命中路径 + 可复制的命令
+python skills/zcode-tokenspeed/scripts/doctor.py --where-all   # 连扫过的全部候选目录一起列
+```
+
+`--where` 的输出长这样（默认只列命中项，不淹没在别人的插件里）：
+
+```
+=== 插件位置扫描（--where） ===============================================
+  [i] 数据目录候选：
+        C:\Users\你\.zcode
+
+  [√] 命中 1 份 zcode-tokenspeed 副本（候选目录共 120 个，其余 76 个是别的插件）：
+    C:\Users\你\.zcode\cli\plugins\cache\zcode-toolkit\zcode-tokenspeed\0.5.2
+        清单版本 0.5.2   脚本目录 C:\...\0.5.2\skills\zcode-tokenspeed\scripts
+
+  [i] 直接用绝对路径跑完整自检（复制下面这条）：
+       python "C:\...\0.5.2\skills\zcode-tokenspeed\scripts\doctor.py"
+```
+
+不想克隆仓库也行，用系统命令直接搜出来：
+
+```powershell
+# Windows PowerShell
+Get-ChildItem "$env:USERPROFILE\.zcode\cli\plugins" -Recurse -Filter doctor.py |
+  Select-Object -First 5 -ExpandProperty FullName
+```
+```bash
+# macOS / Linux
+find ~/.zcode/cli/plugins -name doctor.py 2>/dev/null
+```
+
+### 第二步：看结论
+
+完整自检会把整条链路逐项打出来，并在末尾给出结论，例如：
 
 ```
 === 4. 插件安装与启用 ===
-  [√] 安装位置：~/.zcode/cli/plugins/marketplaces/<市场>/zcode-tokenspeed
-  [i] 清单版本：0.5.1
-  [×]   plugins.enabledPlugins 里没有 zcode-tokenspeed* —— 插件未登记启用状态
+  [√] 安装位置：~/.zcode/cli/plugins/cache/zcode-toolkit/zcode-tokenspeed/0.5.2
+  [i] 清单版本：0.5.2
+  [×]   plugins.enabledPlugins 里没有 zcode-tokenspeed@* —— 插件未登记启用状态
   [×] 插件未处于「已启用」——**钩子不会进入会话，自动化全部不会发生**
 
 === 结论 ===
@@ -266,10 +319,11 @@ python skills/zcode-tokenspeed/scripts/doctor.py
 
 加上 `--json` 可以输出一段结构化报告，方便贴给他人排查。
 
-### 五个最常见的卡点
+### 六个最常见的卡点
 
 | 卡点 | 自检里的样子 | 怎么办 |
 |---|---|---|
+| **自检脚本跑不起来** | `can't open file '...\doctor.py'` | 你在插件缓存目录里敲了相对路径。到**克隆的仓库**里跑，或用上面 `--where` / `find` 得到的绝对路径 |
 | **插件没启用** | 第 4 节 `enabledPlugins` 里没有本插件 | 「设置 → 插件 → 管理已安装」打开开关 |
 | **配置没保存过** | 第 5 节 `plugins.options` 里没有本插件 | 高级信息 → 配置 → 拨开关 → **保存配置**（或 [手动写配置](#3-手动写配置兜底方案)） |
 | **没开过新会话** | 第 7 节没有 `_sync.last` / `_sync.log` | `SessionStart` 钩子在**新会话第一轮**才触发：重启后要真的开一个会话 / 发一条消息 |
@@ -282,7 +336,8 @@ python skills/zcode-tokenspeed/scripts/doctor.py
 
 ### 完全绕开插件（保底方案）
 
-只要 Python 能跑，命令行这条路与插件开关**效果完全一致**，且不依赖钩子：
+只要 Python 能跑，命令行这条路与插件开关**效果完全一致**，且不依赖钩子 ——
+**连插件都不用装**，把仓库拉下来就能用：
 
 ```bash
 python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --check   # 先看状态
@@ -322,7 +377,8 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all          # 一次�
 
 | 现象 | 处理 |
 |---|---|
-| **插件装好了但什么都没发生** | 先跑 `python skills/zcode-tokenspeed/scripts/doctor.py`，它会指出卡在哪一环（见 [装了没生效？先跑自检](#装了没生效先跑自检)） |
+| **插件装好了但什么都没发生** | 别猜，跑自检定位卡点：[装了没生效？先跑自检](#装了没生效先跑自检) |
+| 跑自检报 `can't open file '...\doctor.py'` | 你在插件的缓存目录里敲了相对路径。到**克隆的仓库**里跑，或用 `--where` / `find` 找到的绝对路径（[说明](#第一步把自检脚本跑起来)） |
 | 开关拨了但功能没出现 | ① 确认插件在「管理已安装」里是**启用**状态；② 确认点了 **保存配置**；③ 重启后要**开个新会话**（`SessionStart` 在新会话第一轮才触发）；④ 重打包级功能需要**退出两次**才可见 |
 | 想知道钩子到底有没有执行 | 看 `scripts/_sync.last`（心跳）与 `scripts/_sync.log`；最权威的是 ZCode 日志 `~/.zcode/cli/log/zcode-<日期>.jsonl` 里搜 `session_start_hooks` |
 | 插件页提示「打开一个工作区以管理插件」 | 先打开任意项目 / 工作区，插件页才可用 |
@@ -410,7 +466,7 @@ skills/zcode-tokenspeed/
   SKILL.md                                    执行流程 + 逆向笔记 + 排障（AI 代执行入口）
   scripts/
     zcode_patcher.py                          主工具：八个补丁
-    doctor.py                                 安装自检：一条命令诊断「为什么没生效」
+    doctor.py                                 安装自检：一条命令诊断「为什么没生效」（--where 查安装位置）
     zcode-tps.js                              TPS 状态栏注入脚本（ServicePort 事件流）
     zcode-thought-slider.js                   思考强度滑条注入脚本
     zcode-enhance-prompt.js                   增强提示词按钮注入脚本
