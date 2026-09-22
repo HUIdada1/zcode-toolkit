@@ -11,8 +11,8 @@ default_effort，如 workbuddy2api），按模型写实 limit 与思考档位；
 （1M/128k + off/high/max）。已有条目默认原样保留（含手改的配置）；--refresh 可按服务器
 元数据刷新已有条目的 limit 与思考档位。
 
-逻辑移植自 https://github.com/HHQ-666/zcode-model-puller (MIT, (c) HHQ-666) 的
-zcode_sync.py，改动：跨平台路径、非交互参数、元数据感知模板、--refresh、dry-run、写前备份。
+配置同步逻辑基于 MIT 许可的社区项目二次开发（许可声明见 NOTICE.md），
+改动：跨平台路径、非交互参数、元数据感知模板、--refresh、dry-run、写前备份。
 
 用法：
   python model_pull.py                  # 交互式选择供应商

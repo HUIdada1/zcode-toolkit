@@ -576,9 +576,9 @@ class TestSidecarFingerprint(TempCase):
 class TestPullerInjectionState(unittest.TestCase):
     def test_main_segment_comparison_ignores_leading_newline(self):
         """回归：注入段以换行开头，比对/剥离必须把它算进去，否则永远误报「版本旧」。"""
-        blob = b"var x=1;\n" + zp._puller_main_injection("j") + \
+        blob = b"var x=1;\n" + zp._models_main_block("j") + \
                b"j.handle(E.SaveMcpToUserDirectory,()=>{});"
-        injected, synced, clean, alias = zp._puller_main_state(blob)
+        injected, synced, clean, alias = zp._models_main_state(blob)
         self.assertTrue(injected)
         self.assertTrue(synced, "main 注入段被误判为旧版")
         self.assertEqual(alias, "j")
@@ -586,14 +586,14 @@ class TestPullerInjectionState(unittest.TestCase):
 
     def test_preload_segment_comparison(self):
         blob = b"_.contextBridge.exposeInMainWorld(\"zcode\",{" + \
-               zp._puller_preload_injection("_") + b"other:1});"
-        injected, synced, _clean, alias = zp._puller_preload_state(blob)
+               zp._models_preload_block("_") + b"other:1});"
+        injected, synced, _clean, alias = zp._models_preload_state(blob)
         self.assertTrue(injected and synced)
         self.assertEqual(alias, "_")
 
     def test_marker_absent_means_not_injected(self):
         blob = b'_.contextBridge.exposeInMainWorld("zcode",{other:1});'
-        self.assertEqual(zp._puller_preload_state(blob)[:2], (False, False))
+        self.assertEqual(zp._models_preload_state(blob)[:2], (False, False))
 
 
 class TestGeneratedJs(unittest.TestCase):
@@ -613,20 +613,27 @@ class TestGeneratedJs(unittest.TestCase):
             self.assertEqual(r.returncode, 0, f"生成的 JS 语法错误：{r.stderr[:300]}")
 
     def test_main_injection_is_valid_js(self):
-        code = zp._puller_main_injection("j").decode()
+        code = zp._models_main_block("j").decode()
         self._check(code)
         self.assertIn("renameSync", code, "配置写入应为原子替换")
         self.assertIn("oldOrder", code, "modelOrder 应保序")
 
     def test_preload_injection_is_valid_js(self):
-        self._check("const o={" + zp._puller_preload_injection("_").decode() + "x:1};")
+        self._check("const o={" + zp._models_preload_block("_").decode()
+                    + zp._enhance_preload_block("_").decode() + "x:1};")
+
+    def test_enhance_main_injection_is_valid_js(self):
+        code = zp._enhance_main_block("j").decode()
+        self._check(code)
+        self.assertIn("zcode:enhance-prompt", code)
+        self.assertIn("chat/completions", code)
 
     def test_main_segment_matches_regenerated(self):
         """注入 → 状态判定 → 再生成，三段必须逐字节一致（否则每次都会白重写）。"""
-        blob = b"var x=1;\n" + zp._puller_main_injection("j") + b"j.handle(E.SaveMcpToUserDirectory,1);"
-        injected, synced, clean, alias = zp._puller_main_state(blob)
+        blob = b"var x=1;\n" + zp._models_main_block("j") + b"j.handle(E.SaveMcpToUserDirectory,1);"
+        injected, synced, clean, alias = zp._models_main_state(blob)
         self.assertTrue(injected and synced)
-        rebuilt = clean[:0] + b"var x=1;\n" + zp._puller_main_injection(alias) + \
+        rebuilt = clean[:0] + b"var x=1;\n" + zp._models_main_block(alias) + \
             b"j.handle(E.SaveMcpToUserDirectory,1);"
         self.assertEqual(rebuilt, blob)
 
@@ -674,6 +681,99 @@ class TestRealInstall(unittest.TestCase):
 
     def test_version_readable(self):
         self.assertRegex(zp.asar_version(self.asar) or "", r"^\d+\.\d+")
+
+
+# ------------------------------------------------------------------ 模块符号与注入块
+
+class TestModuleSurface(unittest.TestCase):
+    """防止重构时误删符号——本轮就真发生过：整段替换把 _read_asar_header 与
+    REASONING_MAP_* 一起删掉，直到跑测试才暴露。"""
+
+    REQUIRED = [
+        # asar 基础
+        "_read_asar_header", "_asar_header_raw", "_asar_entry_bytes", "_asar_integrity",
+        "_asar_walk_entries", "_repack_asar", "_asar_sync_integrity", "_load_sidecar",
+        "_refresh_chart_sidecar", "_cleanup_stale_tmp", "_relocate_sidecar",
+        # 备份指纹
+        "_ensure_backup", "_load_backup_meta", "_mark_backup_patched", "_archive_backup",
+        # 内核补丁
+        "process", "replacement_for", "extract_anchor", "detect_reasoning_mechanism",
+        "ANCHORS", "HELPER", "MARKER",
+        # 补丁入口
+        "process_usage_chart", "process_model_width", "process_tps_footer",
+        "process_thought_slider", "process_model_puller", "process_enhance_prompt",
+        "process_reasoning_config", "prune_artifacts", "_process_ipc_patch",
+        # 注入块（标记定界）
+        "MODELS_BLOCK", "ENHANCE_BLOCK", "_block_mark", "_wrap_block", "_block_span",
+        "_bridge_block_state",
+        "_models_preload_block", "_models_main_block", "_models_preload_state", "_models_main_state",
+        "_enhance_preload_block", "_enhance_main_block", "_enhance_preload_state", "_enhance_main_state",
+        "PULLER_SPEC", "ENHANCE_SPEC",
+        # 档位映射 / 路径常量
+        "REASONING_MAP_OPENAI", "REASONING_MAP_ANTHROPIC", "_desired_levels", "_v2_root",
+        "TPS_SCRIPT_PATH", "SLIDER_SCRIPT_PATH", "PULLER_SCRIPT_PATH", "ENHANCE_SCRIPT_PATH",
+        "TPS_TAG", "SLIDER_TAG", "PULLER_TAG", "ENHANCE_TAG",
+    ]
+
+    def test_required_symbols_exist(self):
+        missing = [n for n in self.REQUIRED if not hasattr(zp, n)]
+        self.assertEqual(missing, [], f"模块缺少符号：{missing}")
+
+
+class TestInjectionBlocks(unittest.TestCase):
+    """标记定界注入块：模型拉取与增强提示词共用 preload/main 锚点，必须互不干扰。"""
+
+    def test_block_roundtrip(self):
+        body = b"readConfigFile:()=>x,"
+        blob = b"prefix" + zp._wrap_block("demo", body) + b"suffix"
+        span = zp._block_span(blob, "demo")
+        self.assertIsNotNone(span)
+        i, j = span
+        self.assertEqual(blob[i:j], zp._wrap_block("demo", body))
+        self.assertEqual(blob[:i] + blob[j:], b"prefixsuffix")
+        self.assertIsNone(zp._block_span(blob, "not-there"))
+
+    def test_two_blocks_coexist_and_strip_independently(self):
+        models = zp._models_preload_block("_")
+        enhance = zp._enhance_preload_block("_")
+        blob = (b'_.contextBridge.exposeInMainWorld("zcode",{' + models + enhance + b"other:1});")
+        for block_id, want in ((zp.MODELS_BLOCK, models), (zp.ENHANCE_BLOCK, enhance)):
+            span = zp._block_span(blob, block_id)
+            self.assertIsNotNone(span, block_id)
+            self.assertEqual(blob[span[0]:span[1]], want, block_id)
+        # 摘掉 models 块后，enhance 块内容必须原样保留
+        s = zp._block_span(blob, zp.MODELS_BLOCK)
+        stripped = blob[:s[0]] + blob[s[1]:]
+        self.assertIsNone(zp._block_span(stripped, zp.MODELS_BLOCK))
+        e = zp._block_span(stripped, zp.ENHANCE_BLOCK)
+        self.assertIsNotNone(e)
+        self.assertEqual(stripped[e[0]:e[1]], enhance)
+
+    def test_main_blocks_coexist(self):
+        models = zp._models_main_block("j")
+        enhance = zp._enhance_main_block("j")
+        blob = models + enhance + b"j.handle(E.SaveMcpToUserDirectory,1);"
+        inj, synced, clean, alias = zp._models_main_state(blob)
+        self.assertTrue(inj and synced, "共用锚点时 models 块仍应判定为已同步")
+        self.assertNotIn(b"read-model-config", clean)
+        self.assertIn(zp._enhance_main_block(alias), clean)
+
+    def test_legacy_preload_format_is_migrated(self):
+        """老版本（无标记定界）注入段应判为「存在但需更新」，且能被安全剥离。"""
+        legacy = (b'_.contextBridge.exposeInMainWorld("zcode",{'
+                  b'readConfigFile:()=>_.ipcRenderer.invoke("zcode:read-model-config"),'
+                  b'writeConfigFile:t=>_.ipcRenderer.invoke("zcode:write-model-config",t),'
+                  b'fetchModelsFromUrl:(t,n)=>_.ipcRenderer.invoke("zcode:fetch-models-from-url",'
+                  b'{baseUrl:t,apiKey:n}),other:1});')
+        inj, synced, clean, _alias = zp._models_preload_state(legacy)
+        self.assertTrue(inj)
+        self.assertFalse(synced, "老格式应被判为需要更新（迁移到标记定界）")
+        self.assertNotIn(b"read-model-config", clean)
+        self.assertIn(b"other:1", clean)
+
+    def test_enhance_block_absent_when_not_injected(self):
+        blob = b'_.contextBridge.exposeInMainWorld("zcode",{other:1});'
+        self.assertEqual(zp._enhance_preload_state(blob)[:2], (False, False))
 
 
 if __name__ == "__main__":

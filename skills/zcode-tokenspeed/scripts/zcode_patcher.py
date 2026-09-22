@@ -54,11 +54,18 @@ ZCode 客户端补丁工具
   四处改动：out/renderer/ 新增 zcode-model-puller.js + index.html 挂载 +
   preload 暴露 3 个 IPC 方法（readConfigFile/writeConfigFile/fetchModelsFromUrl）+
   main 注册 3 个 IPC handler（读写 ~/.zcode/v2/config.json、代理拉模型列表）。
-  前端脚本 vendored from HHQ-666/zcode-model-puller (MIT)；
+  前端脚本基于 MIT 许可的社区项目二次开发（见 NOTICE.md）；
   preload/main 锚点用语义字符串定位（exposeInMainWorld("zcode",{ / SaveMcpToUserDirectory），
   压缩符号经正则捕获，跨版本无需维护符号表。
   原件备份 app.asar.puller.bak，记录在 app.asar.puller-patch.json，可整体还原。
   另有命令行版 scripts/model_pull.py：不动 asar，直接同步 config.json。
+
+七、增强提示词（app.asar，--enhance-prompt）
+  在输入框工具栏注入「增强提示词」按钮：取当前草稿 → 经 preload 桥 / main handler 用
+  **界面当前选中的模型**调一次对话补全 → 写回输入框，按钮临时变「恢复原文」可一键还原。
+  提示词模板内置（_ENHANCE_SYSTEM_PROMPT / _ENHANCE_USER_TEMPLATE）：保持原语言、只输出改写结果、
+  不回答问题、不加解释。四组件注入与还原走与模型拉取按钮同一套通用链路
+  （_process_ipc_patch），preload/main 注入段按 /*zp:begin:<块名>*/ 标记定界，两者互不干扰。
 
 六、思考档位配置（配置侧，--reasoning-config，**3.14+ 用这个替代内核补丁**）
   3.14 起档位机制改为「配置侧原生」：档位列表与请求参数都由 provider_config.json 的
@@ -81,6 +88,7 @@ ZCode 客户端补丁工具
   python zcode_patcher.py --tps-footer          # TPS 统计栏注入（同样支持 --check/--revert）
   python zcode_patcher.py --thought-slider      # 思考强度吸附滑条（同样支持 --check/--revert）
   python zcode_patcher.py --model-puller        # 模型拉取按钮注入（同样支持 --check/--revert）
+  python zcode_patcher.py --enhance-prompt      # 增强提示词按钮注入（同样支持 --check/--revert）
   python zcode_patcher.py "D:\\ZCode"           # 只处理指定安装（安装根目录或 zcode.cjs 均可）
 
 通用开关：
@@ -999,7 +1007,7 @@ SLIDER_SCRIPT_PATH = "out/renderer/zcode-thought-slider.js"
 SLIDER_TAG = f'<script src="./{SLIDER_SCRIPT_PATH.split("/")[-1]}"></script>'
 
 # ---------------------------------------- 模型拉取按钮注入（asar 重打包级，--model-puller）
-# 前端脚本 vendored from HHQ-666/zcode-model-puller (MIT)；preload 桥与 main IPC handler
+# 前端脚本基于 MIT 许可的社区项目二次开发（见 NOTICE.md）；preload 桥与 main IPC handler
 # 在此内置。锚点用语义字符串 + 正则捕获压缩符号（electron 别名 / ipcMain 包装别名），
 # 不随版本符号重排失效——等价于内核锚点的结构化提取，天然跨版本。
 
@@ -1011,73 +1019,148 @@ PULLER_TAG = f'<script type="module" src="./{PULLER_SCRIPT_PATH.split("/")[-1]}"
 PULLER_MARKER = b'zcode:read-model-config'
 PULLER_PRELOAD_ANCHOR = re.compile(rb'(\w+)\.contextBridge\.exposeInMainWorld\("zcode",\{')
 PULLER_MAIN_ANCHOR = re.compile(rb'(\w+)\.handle\(\w+\.SaveMcpToUserDirectory')
-# 还原用：精确匹配自身注入的整段字节（压缩符号经 \w+ 通配），与 sidecar 无关，
-# 其他补丁（TPS/chart）重打包改变 asar 大小也不影响还原精确性
-PULLER_PRELOAD_STRIP = re.compile(
+
+ENHANCE_SCRIPT_PATH = "out/renderer/zcode-enhance-prompt.js"
+ENHANCE_TAG = f'<script type="module" src="./{ENHANCE_SCRIPT_PATH.split("/")[-1]}"></script>'
+ENHANCE_MARKER = b'zcode:enhance-prompt'
+
+# 注入块名（标记定界用，见下方「注入块」小节）
+MODELS_BLOCK = "zcode-models"
+ENHANCE_BLOCK = "zcode-enhance"
+
+# 旧版（无标记定界）注入段的剥离正则——只用于把已装的老版本迁移到新格式
+PULLER_PRELOAD_STRIP_LEGACY = re.compile(
     rb'readConfigFile:\(\)=>\w+\.ipcRenderer\.invoke\("zcode:read-model-config"\),'
     rb'writeConfigFile:t=>\w+\.ipcRenderer\.invoke\("zcode:write-model-config",t\),'
     rb'fetchModelsFromUrl:\(t,n\)=>\w+\.ipcRenderer\.invoke\("zcode:fetch-models-from-url"\,\{baseUrl:t,apiKey:n\}\),'
 )
-PULLER_MAIN_STRIP = re.compile(rb'\w+\.handle\("zcode:read-model-config"')
+PULLER_MAIN_STRIP_LEGACY = re.compile(rb'\w+\.handle\("zcode:read-model-config"')
 
 
-def _puller_preload_injection(electron_alias: str) -> bytes:
-    """在 exposeInMainWorld("zcode",{ 对象字面量开头插入 3 个 IPC 桥方法。
-    不依赖压缩 helper s()：contextBridge 对普通箭头函数无要求。"""
+# ============================================================ 注入块（标记定界）
+# 每个补丁在 preload / main 里各维护一段用注释包起来的代码块：
+#     /*zp:begin:<块名>*/ …… /*zp:end:<块名>*/
+# 检测 = 取出本块内容与「重新生成的期望内容」逐字节比对；还原 = 只摘除自己的块。
+#
+# 为什么必须标记定界：preload/main 里可用的锚点各只有一个（exposeInMainWorld("zcode",{ 与
+# SaveMcpToUserDirectory），多个补丁共用同一锚点时，「从自己的首条语句一直比到锚点」这种老判定
+# 会被中间插入的其它补丁破坏 —— 表现为永远比不中、每次执行都白重写一遍、甚至重复注入。
+
+def _block_mark(block_id: str, begin: bool = True) -> bytes:
+    return f"/*zp:{'begin' if begin else 'end'}:{block_id}*/".encode()
+
+
+def _wrap_block(block_id: str, body: bytes) -> bytes:
+    return _block_mark(block_id) + body + _block_mark(block_id, False)
+
+
+def _block_span(blob: bytes, block_id: str):
+    """返回本块在 blob 里的 [start, end) 区间；不存在返回 None。"""
+    b, e = _block_mark(block_id), _block_mark(block_id, False)
+    i = blob.find(b)
+    if i < 0:
+        return None
+    j = blob.find(e, i + len(b))
+    if j < 0:
+        return None
+    return i, j + len(e)
+
+
+def _bridge_block_state(blob: bytes | None, block_id: str, want: bytes, legacy_segment=None):
+    """通用块状态：(injected, synced, clean)。
+    优先按标记块判定；没有标记块但能定位到老格式注入段时返回 (True, False, 剥离后内容)，
+    上层据此走「重新注入」把老格式迁移到标记定界格式。"""
+    if blob is None:
+        return False, False, None
+    span = _block_span(blob, block_id)
+    if span is not None:
+        i, j = span
+        return True, blob[i:j] == want, blob[:i] + blob[j:]
+    if legacy_segment is not None:
+        seg = legacy_segment(blob)
+        if seg is not None:
+            i, j = seg
+            return True, False, blob[:i] + blob[j:]
+    return False, False, blob
+
+
+# ------------------------------------------------------------ 模型拉取按钮的注入块
+
+def _models_preload_block(electron_alias: str) -> bytes:
+    """exposeInMainWorld("zcode",{ 对象字面量里插入 3 个 IPC 桥方法。
+    不依赖压缩 helper：contextBridge 对普通箭头函数无要求。"""
     e = electron_alias
-    return (
+    body = (
         f'readConfigFile:()=>{e}.ipcRenderer.invoke("zcode:read-model-config"),'
         f'writeConfigFile:t=>{e}.ipcRenderer.invoke("zcode:write-model-config",t),'
         f'fetchModelsFromUrl:(t,n)=>{e}.ipcRenderer.invoke("zcode:fetch-models-from-url",'
         f'{{baseUrl:t,apiKey:n}}),'
     ).encode()
+    return _wrap_block(MODELS_BLOCK, body)
 
 
-def _puller_preload_state(blob: bytes | None):
-    """解析 preload 注入状态：(injected, synced, clean, alias)。
-    synced=当前注入段与现行生成器逐字节一致（marker 存在但内容旧时为 False）；
-    clean=剥离注入后的原始内容（无法安全剥离时为 None，调用方应拒绝改写）。"""
+def _models_preload_state(blob: bytes | None):
+    """(injected, synced, clean, alias)。"""
     if blob is None:
         return False, False, None, None
     a = PULLER_PRELOAD_ANCHOR.search(blob)
     if a is None:
         return False, False, None, None
     alias = a.group(1).decode()
-    if PULLER_MARKER not in blob:
-        return False, False, blob, alias
-    m = PULLER_PRELOAD_STRIP.search(blob)
-    if m is None:
-        return True, False, None, alias          # 有注入但形态不符，无法安全剥离
-    stripped = blob[:m.start()] + blob[m.end():]
-    if m.group(0) == _puller_preload_injection(alias):
-        return True, True, stripped, alias
-    return True, False, stripped, alias
+
+    def legacy(b: bytes):
+        m = PULLER_PRELOAD_STRIP_LEGACY.search(b)
+        return (m.start(), m.end()) if m else None
+
+    inj, synced, clean = _bridge_block_state(blob, MODELS_BLOCK,
+                                             _models_preload_block(alias), legacy)
+    return inj, synced, clean, alias
 
 
-def _puller_main_state(blob: bytes | None):
-    """解析 main 注入状态：注入段 = [首条 handler 起点, SaveMcpToUserDirectory 锚点起点)。
-    返回 (injected, synced, clean, alias)；clean 恒为剥离注入后的内容（未注入时即 blob）。"""
+def _models_main_state(blob: bytes | None):
     if blob is None:
         return False, False, None, None
     a = PULLER_MAIN_ANCHOR.search(blob)
     if a is None:
         return False, False, None, None
     alias = a.group(1).decode()
-    if PULLER_MARKER not in blob:
-        return False, False, blob, alias
-    m = PULLER_MAIN_STRIP.search(blob)
-    if m is None or m.start() >= a.start():
-        return True, False, None, alias
-    # 注入段整体以换行开头（read_h 模板首字符），比对/剥离都要把它算进去，
-    # 否则永远比不中 → 每次 --check 都误报「含旧版组件」、每次打补丁都白重写一遍。
-    seg_start = m.start() - 1 if m.start() > 0 and blob[m.start() - 1:m.start()] == b"\n" else m.start()
-    stripped = blob[:seg_start] + blob[a.start():]
-    if blob[seg_start:a.start()] == _puller_main_injection(alias):
-        return True, True, stripped, alias
-    return True, False, stripped, alias
+
+    def legacy(b: bytes):
+        m = PULLER_MAIN_STRIP_LEGACY.search(b)
+        if m is None or m.start() >= a.start():
+            return None
+        # 老格式注入段以换行开头（read_h 模板首字符），剥离时要算进去
+        start = m.start() - 1 if m.start() > 0 and b[m.start() - 1:m.start()] == b"\n" else m.start()
+        return (start, a.start())
+
+    inj, synced, clean = _bridge_block_state(blob, MODELS_BLOCK,
+                                             _models_main_block(alias), legacy)
+    return inj, synced, clean, alias
 
 
-def _puller_main_injection(ipc_alias: str) -> bytes:
+def _enhance_preload_state(blob: bytes | None):
+    if blob is None:
+        return False, False, None, None
+    a = PULLER_PRELOAD_ANCHOR.search(blob)
+    if a is None:
+        return False, False, None, None
+    alias = a.group(1).decode()
+    inj, synced, clean = _bridge_block_state(blob, ENHANCE_BLOCK, _enhance_preload_block(alias))
+    return inj, synced, clean, alias
+
+
+def _enhance_main_state(blob: bytes | None):
+    if blob is None:
+        return False, False, None, None
+    a = PULLER_MAIN_ANCHOR.search(blob)
+    if a is None:
+        return False, False, None, None
+    alias = a.group(1).decode()
+    inj, synced, clean = _bridge_block_state(blob, ENHANCE_BLOCK, _enhance_main_block(alias))
+    return inj, synced, clean, alias
+
+
+def _models_main_block(ipc_alias: str) -> bytes:
     """在 ipcMain 别名的 SaveMcpToUserDirectory 注册语句前插入 3 个 handler。
     3.14.x 起界面供应商列表真正读写 <dataBaseDir>/.zcode/v2/provider_config.json
     （schemaVersion 1：providerRules.personalModelIds/modelOrder + providerModelRules），
@@ -1215,7 +1298,8 @@ for(let m of keep)mrules.push(m)
 if(!n.existsSync(pcPath+".puller-bak"))try{n.writeFileSync(pcPath+".puller-bak",n.readFileSync(pcPath,"utf-8"))}catch(a2){}
 let tmpPc=pcPath+".tmp";
 n.writeFileSync(tmpPc,JSON.stringify(pc,null,2),"utf-8");
-n.renameSync(tmpPc,pcPath);}catch(syncErr){return{success:!0,warn:"config.json written; provider_config.json sync failed: "+String(syncErr)}}
+n.renameSync(tmpPc,pcPath);
+}catch(syncErr){return{success:!0,warn:"config.json written; provider_config.json sync failed: "+String(syncErr)}}
 return{success:!0}}
 catch(n){return{success:!1,error:String(n)}}});
 '''.replace("__H__", h)
@@ -1259,7 +1343,120 @@ catch(n){return{success:!1,error:String(n)}}});
         'return{success:!1,error:"未能获取到模型列表，请检查 Base URL 和 API Key"}}'
         'catch(e){return{success:!1,error:String(e)}}});\n'
     )
-    return (read_h + write_h + fetch_h).encode()
+    return _wrap_block(MODELS_BLOCK, (read_h + write_h + fetch_h).encode())
+
+
+# ------------------------------------------------------------ 增强提示词的注入块
+
+def _enhance_preload_block(electron_alias: str) -> bytes:
+    e = electron_alias
+    body = (f'enhancePrompt:(t,n)=>{e}.ipcRenderer.invoke("zcode:enhance-prompt",'
+            f'{{text:t,modelValue:n}}),').encode()
+    return _wrap_block(ENHANCE_BLOCK, body)
+
+
+def _enhance_main_block(ipc_alias: str) -> bytes:
+    """在 ipcMain 别名的 SaveMcpToUserDirectory 前插入「增强提示词」handler。
+    用界面当前选中的模型（config.json 里解析 baseURL/apiKey/kind）调一次对话补全，
+    提示词与 WorkBuddy 的 input.enhance 功能同源。"""
+    h = ipc_alias
+    return _wrap_block(ENHANCE_BLOCK, _ENHANCE_HANDLER.replace("__H__", h).encode())
+
+
+_ENHANCE_SYSTEM_PROMPT = (
+    "You are a Prompt Engineering Expert specializing in improving user prompts for a "
+    "development code assistant. Analyze the given prompt and produce a more effective version "
+    "while keeping its core purpose.\n"
+    "RULES://n"
+    "1. Language matching is the highest priority: reply in exactly the same language as the "
+    "user's input (Chinese stays Chinese, English stays English, mixed stays mixed).\n"
+    "2. Keep the enhanced prompt concise (roughly under 800 characters).\n"
+    "3. Do NOT answer the request, do NOT explain how, do NOT add guides, do NOT suggest "
+    "specific technologies unless the user mentioned them.\n"
+    "4. Output only the enhanced prompt — no preface, no commentary, no markdown fences."
+)
+
+_ENHANCE_USER_TEMPLATE = (
+    "USER INPUT://n{input}//n//n"
+    "TASK://nRewrite the user input into a clearer, more specific prompt for the target AI "
+    "assistant. Preserve intent, topic, constraints and expected output type.\n"
+    "CRITICAL - LANGUAGE CONSISTENCY: write the enhanced prompt in the same language as the "
+    "user input; never include language analysis or language labels in the output.\n"
+    "REQUIREMENTS: return only the enhanced prompt text; make a substantive enhancement "
+    "(clarify task, scope, constraints, expected output); if it is already clear, lightly "
+    "polish it; keep it complete and concise (no dangling list or trailing colon)."
+)
+
+_ENHANCE_HANDLER = '''
+__H__.handle("zcode:enhance-prompt",async(e,t)=>{
+try{
+let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os");
+let base=i.homedir();
+try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
+if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
+let root=r.join(base,".zcode","v2");
+let cfg={provider:{}};
+try{let d=JSON.parse(n.readFileSync(r.join(root,"config.json"),"utf-8"));
+if(d&&typeof d=="object"&&!Array.isArray(d))cfg=d}catch(_){}
+let text=String((t&&t.text)||"").trim();
+if(!text)return{success:!1,error:"输入框是空的"};
+// 目标模型：优先用界面当前选中值（形如 providerId/modelId），否则退回第一个可用的自定义供应商
+let pick=null,mv=String((t&&t.modelValue)||"").trim();
+if(mv){let k=mv.indexOf("/");
+if(k>0){let pid=mv.slice(0,k),mid=mv.slice(k+1);
+let p=cfg.provider&&cfg.provider[pid];
+if(p&&p.models&&p.models[mid])pick={pid:pid,mid:mid,p:p}}}
+if(!pick){
+for(let ent of Object.entries(cfg.provider||{})){
+let pid=ent[0],p=ent[1];
+if(String(pid).startsWith("builtin:"))continue;
+if(!p||typeof p!="object")continue;
+let mid=Object.keys(p.models||{})[0];
+if(mid&&p.options&&p.options.baseURL){pick={pid:pid,mid:mid,p:p};break}}}
+if(!pick)return{success:!1,error:"没找到可用的模型：请先在设置里配置供应商与 API Key"};
+let u=String(pick.p.options.baseURL||"").replace(/\\/+$/,"");
+let k=String(pick.p.options.apiKey||"");
+let kind=String(pick.p.kind||"openai-compatible");
+let sys="__SYS__",tpl="__TPL__";
+let user=tpl.replace("{input}",text);
+let cs=[],body,headers={"Content-Type":"application/json","Accept":"application/json"};
+if(k){headers.Authorization="Bearer "+k;headers["x-api-key"]=k}
+if(kind==="anthropic"){
+let b=(u.endsWith("/v1")?u:u+"/v1");
+cs.push(b+"/messages");
+body={model:pick.mid,max_tokens:2048,system:sys,messages:[{role:"user",content:user}]}}
+else{
+let b=(u.endsWith("/v1")?u:u+"/v1");
+cs.push(b+"/chat/completions");
+cs.push(u+"/chat/completions");
+body={model:pick.mid,stream:!1,temperature:0.3,max_tokens:2048,
+messages:[{role:"system",content:sys},{role:"user",content:user}]}}
+let payload=JSON.stringify(body);
+for(let cur of cs){
+let res=await new Promise(resolve=>{
+let mod=cur.startsWith("https:")?require("node:https"):require("node:http");
+let req=mod.request(cur,{method:"POST",headers:Object.assign({},headers,{"Content-Length":Buffer.byteLength(payload)}),timeout:60000},r=>{
+let b="";r.on("data",c=>b+=c);
+r.on("end",()=>{
+if(r.statusCode>=200&&r.statusCode<300){try{
+let j=JSON.parse(b),out="";
+if(j&&j.choices&&j.choices[0]){let m0=j.choices[0].message||{};out=String(m0.content||"")}
+if(!out&&j&&Array.isArray(j.content)){out=j.content.map(function(c){return String(c&&c.text||"")}).join("")}
+if(!out&&j&&typeof j.output_text=="string")out=j.output_text;
+out=out.trim();
+if(out)return resolve({success:!0,text:out,model:pick.mid})
+return resolve({success:!1,error:"模型返回了空内容"})
+}catch(err){return resolve({success:!1,error:"响应解析失败: "+String(err)})}}
+let msg="";
+try{let j=JSON.parse(b);msg=(j&&(j.error&&(j.error.message||j.error)||j.message))||""}catch(_){msg=b.slice(0,200)}
+return resolve({success:!1,error:"HTTP "+r.statusCode+(msg?(" "+String(msg)):"")})})});
+req.on("error",err=>resolve({success:!1,error:"请求失败: "+String(err&&err.message||err)}));
+req.on("timeout",()=>{req.destroy();resolve({success:!1,error:"请求超时（60s）"})});
+req.write(payload);req.end()});
+if(res)return res}
+return{success:!1,error:"未能连通 "+u+"，请检查供应商地址与协议类型"}
+}catch(e){return{success:!1,error:String(e)}}});
+'''
 
 
 def _read_asar_header(asar: Path):
@@ -1633,22 +1830,56 @@ def process_thought_slider(asar: Path, check_only: bool, revert: bool, slider_sr
                                   dry_run=dry_run, version=version)
 
 
-def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src: Path | None, *,
-                         dry_run: bool = False, version: str | None = None) -> bool:
-    """模型拉取按钮注入。返回 True=成功/无需改动，False=失败。"""
-    side = asar.with_name(asar.name + ".puller-patch.json")
-    bak = asar.with_name(asar.name + ".puller.bak")
+# ------------------------------------------------- preload/main IPC 桥注入（通用链路）
 
+PULLER_SPEC = {
+    "label": "模型拉取按钮",
+    "script_entry": PULLER_SCRIPT_PATH,
+    "tag": PULLER_TAG,
+    "src_name": PULLER_SCRIPT_PATH.split("/")[-1],
+    "preload_block": _models_preload_block,
+    "main_block": _models_main_block,
+    "preload_state": _models_preload_state,
+    "main_state": _models_main_state,
+    "side_suffix": ".puller-patch.json",
+    "bak_suffix": ".puller.bak",
+    "src_hint": "--puller-src",
+}
+
+ENHANCE_SPEC = {
+    "label": "增强提示词",
+    "script_entry": ENHANCE_SCRIPT_PATH,
+    "tag": ENHANCE_TAG,
+    "src_name": ENHANCE_SCRIPT_PATH.split("/")[-1],
+    "preload_block": _enhance_preload_block,
+    "main_block": _enhance_main_block,
+    "preload_state": _enhance_preload_state,
+    "main_state": _enhance_main_state,
+    "side_suffix": ".enhance-patch.json",
+    "bak_suffix": ".enhance.bak",
+    "src_hint": "--enhance-src",
+}
+
+
+def _process_ipc_patch(asar: Path, check_only: bool, revert: bool, src_path: Path | None,
+                       spec: dict, *, dry_run: bool = False, version: str | None = None) -> bool:
+    """preload 桥 + main handler + renderer 脚本 + index.html 挂载 的通用注入链路
+    （模型拉取按钮 / 增强提示词共用）。四组件均按「内容比对」判定版本，逐组件更新。
+    返回 True=成功/无需改动，False=失败。"""
+    label = spec["label"]
+    side = asar.with_name(asar.name + spec["side_suffix"])
+    bak = asar.with_name(asar.name + spec["bak_suffix"])
     try:
         asar_size = asar.stat().st_size
         raw, header, data_start = _asar_header_raw(asar)
     except (OSError, ValueError) as e:
         print(f"[!] {asar}\n    无法读取：{e}")
         return False
+
     paths = {p: ent for p, ent in _asar_walk_entries(header)}
-    idx_ent = paths.get(PULLER_INDEX_PATH)
+    idx_ent = paths.get(TPS_INDEX_PATH)
     if idx_ent is None:
-        print(f"[!] {asar}\n    未找到 {PULLER_INDEX_PATH}，版本结构可能已变，跳过")
+        print(f"[!] {asar}\n    未找到 {TPS_INDEX_PATH}，版本结构可能已变，跳过")
         return False
     idx_bytes = _asar_entry_bytes(raw, data_start, idx_ent)
 
@@ -1657,11 +1888,11 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
         return _asar_entry_bytes(raw, data_start, ent) if ent else None
 
     pre_blob, main_blob = _blob(PULLER_PRELOAD_PATH), _blob(PULLER_MAIN_PATH)
-    script_present = PULLER_SCRIPT_PATH in paths
-    idx_tagged = PULLER_TAG.encode() in idx_bytes
-    pre_inj, pre_synced, pre_clean, _ = _puller_preload_state(pre_blob)
-    main_inj, main_synced, main_clean, _ = _puller_main_state(main_blob)
-    cur_script = _asar_entry_bytes(raw, data_start, paths[PULLER_SCRIPT_PATH]) if script_present else None
+    script_present = spec["script_entry"] in paths
+    idx_tagged = spec["tag"].encode() in idx_bytes
+    pre_inj, pre_synced, pre_clean, _ = spec["preload_state"](pre_blob)
+    main_inj, main_synced, main_clean, _ = spec["main_state"](main_blob)
+    cur_script = _blob(spec["script_entry"]) if script_present else None
     installed = script_present and idx_tagged and pre_inj and main_inj
 
     saved = None
@@ -1676,29 +1907,29 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
     def _ver(ok: bool, synced: bool) -> str:
         return "无" if not ok else ("有" if synced else "有（版本旧）")
 
-    comp = (f"renderer 脚本: {'有' if script_present else '无'} | index.html 挂载: {'有' if idx_tagged else '无'} | "
+    comp = (f"renderer 脚本: {'有' if script_present else '无'} | "
+            f"index.html 挂载: {'有' if idx_tagged else '无'} | "
             f"preload 桥: {_ver(pre_inj, pre_synced)} | main handler: {_ver(main_inj, main_synced)}")
 
-    if puller_src is None:
-        puller_src = Path(__file__).resolve().parent / PULLER_SCRIPT_PATH.split("/")[-1]
-    old_script = (script_present and puller_src.is_file()
-                  and cur_script != puller_src.read_bytes())
+    if src_path is None:
+        src_path = Path(__file__).resolve().parent / spec["src_name"]
+    old_script = (script_present and src_path.is_file() and cur_script != src_path.read_bytes())
 
     if check_only:
         state = "已打" if installed else ("不完整" if (script_present or idx_tagged or pre_inj or main_inj) else "未打")
         if installed and (not (pre_synced and main_synced) or old_script):
             state = "已打（含旧版组件，重跑可自动更新）"
-        print(f"[*] {asar}\n    模型拉取按钮注入: {state} | {comp} | sidecar: {'有' if saved else '无'} | "
+        print(f"[*] {asar}\n    {label}注入: {state} | {comp} | sidecar: {'有' if saved else '无'} | "
               f"备份: {'有' if bak.is_file() else '无'}")
         return True
 
     if revert:
         if not installed and not saved:
-            print(f"[.] {asar}\n    未打模型拉取注入，跳过")
+            print(f"[.] {asar}\n    未打{label}注入，跳过")
             return True
-        # 全程外科手术式还原：只摘除自己注入的字节段，不依赖 sidecar 指纹
-        stripped = idx_bytes.replace(PULLER_TAG.encode() + b"\n", b"").replace(PULLER_TAG.encode(), b"")
-        overwrite = {PULLER_INDEX_PATH: stripped}
+        # 全程外科手术式还原：只摘除自己标记定界的块，不依赖 sidecar 指纹
+        stripped = idx_bytes.replace(spec["tag"].encode() + b"\n", b"").replace(spec["tag"].encode(), b"")
+        overwrite = {TPS_INDEX_PATH: stripped}
         if pre_inj:
             if pre_clean is None:
                 print(f"[!] {asar}\n    preload 注入段形态不符（可能被手工改过），拒绝还原")
@@ -1710,10 +1941,11 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
                 return False
             overwrite[PULLER_MAIN_PATH] = main_clean
         if dry_run:
-            print(f"[~] {asar}\n    将还原模型拉取注入（摘除 index.html tag + 还原 preload/main 注入段）")
+            print(f"[~] {asar}\n    将还原{label}注入（摘除 index.html tag + preload/main 注入块）")
             return True
         try:
-            new_size = _repack_asar(asar, overwrite, {PULLER_SCRIPT_PATH} if script_present else set())
+            new_size = _repack_asar(asar, overwrite,
+                                    {spec["script_entry"]} if script_present else set())
         except OSError as e:
             print(f"[!] {asar}\n    文件被占用或无写入权限：{e}\n    请完全退出 ZCode 后重试")
             return False
@@ -1721,18 +1953,17 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
         bak.unlink(missing_ok=True)
         _backup_meta(bak).unlink(missing_ok=True)
         _refresh_chart_sidecar(asar)
-        print(f"[+] {asar}\n    已还原模型拉取注入（新大小 {new_size:,} 字节，备份已清理）")
+        print(f"[+] {asar}\n    已还原{label}注入（新大小 {new_size:,} 字节，备份已清理）")
         return True
 
-    if not puller_src.is_file():
-        print(f"[!] 找不到注入源脚本 {puller_src}（可用 --puller-src 指定路径）")
+    if not src_path.is_file():
+        print(f"[!] 找不到注入源脚本 {src_path}（可用 {spec['src_hint']} 指定路径）")
         return False
-    script_bytes = puller_src.read_bytes()
+    script_bytes = src_path.read_bytes()
 
-    # 幂等：四组件齐、且 renderer/preload/main 注入内容均与现行实现逐字节一致才跳过。
-    # 只按 marker 判断会让旧版注入被误认成"已是最新"（换实现后不更新），必须内容比对。
+    # 幂等：四组件齐、且 renderer/preload/main 注入内容均与现行实现逐字节一致才跳过
     if installed and cur_script == script_bytes and pre_synced and main_synced:
-        print(f"[=] {asar}\n    已打模型拉取注入（四组件均为当前版本），跳过")
+        print(f"[=] {asar}\n    已打{label}注入（四组件均为当前版本），跳过")
         return True
 
     # 锚点核实：三处定位全部唯一才动手
@@ -1747,13 +1978,13 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
               f"    main 锚点: {PULLER_MAIN_ANCHOR.pattern}")
         return False
 
-    # 逐组件更新：仅写入与现行实现不一致的组件；sidecar 原件按组件记录、不覆盖已有记录
+    # 逐组件更新：仅写入与现行实现不一致的组件
     rec = dict(saved or {})
     overwrite: dict[str, bytes] = {}
     if cur_script != script_bytes:
-        overwrite[PULLER_SCRIPT_PATH] = script_bytes
+        overwrite[spec["script_entry"]] = script_bytes
     if not idx_tagged:
-        overwrite[PULLER_INDEX_PATH] = idx_bytes.replace(b"</body>", PULLER_TAG.encode() + b"\n</body>", 1)
+        overwrite[TPS_INDEX_PATH] = idx_bytes.replace(b"</body>", spec["tag"].encode() + b"\n</body>", 1)
         rec.setdefault("index_original_b64", base64.b64encode(idx_bytes).decode())
     if not pre_synced:
         if pre_clean is None:
@@ -1762,7 +1993,7 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
             return False
         anchor = PULLER_PRELOAD_ANCHOR.search(pre_clean).end()
         overwrite[PULLER_PRELOAD_PATH] = (pre_clean[:anchor]
-                                          + _puller_preload_injection(pre_m[0].decode())
+                                          + spec["preload_block"](pre_m[0].decode())
                                           + pre_clean[anchor:])
         rec.setdefault("preload_original_b64", base64.b64encode(pre_clean).decode())
     if not main_synced:
@@ -1772,7 +2003,7 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
             return False
         anchor = PULLER_MAIN_ANCHOR.search(main_clean).start()
         overwrite[PULLER_MAIN_PATH] = (main_clean[:anchor]
-                                       + _puller_main_injection(main_m[0].decode())
+                                       + spec["main_block"](main_m[0].decode())
                                        + main_clean[anchor:])
         rec.setdefault("main_original_b64", base64.b64encode(main_clean).decode())
 
@@ -1791,18 +2022,33 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
     _mark_backup_patched(bak, asar)
     rec.update({
         "asar_size": new_size,
-        "index_path": PULLER_INDEX_PATH,
-        "script_entry": PULLER_SCRIPT_PATH,
+        "index_path": TPS_INDEX_PATH,
+        "script_entry": spec["script_entry"],
         "preload_path": PULLER_PRELOAD_PATH,
         "main_path": PULLER_MAIN_PATH,
     })
     side.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
     _refresh_chart_sidecar(asar)
-    done = "+".join(k for k, v in (("renderer", True), ("index", PULLER_INDEX_PATH in overwrite),
-                                   ("preload", PULLER_PRELOAD_PATH in overwrite), ("main", PULLER_MAIN_PATH in overwrite)) if v)
-    print(f"[+] {asar}\n    模型拉取按钮注入完成（{done}，{puller_src.name} {len(script_bytes):,} 字节）\n"
+    done = "+".join(k for k, v in (("renderer", True), ("index", TPS_INDEX_PATH in overwrite),
+                                   ("preload", PULLER_PRELOAD_PATH in overwrite),
+                                   ("main", PULLER_MAIN_PATH in overwrite)) if v)
+    print(f"[+] {asar}\n    {label}注入完成（{done}，{src_path.name} {len(script_bytes):,} 字节）\n"
           f"    原件备份: {bak.name} | 记录: {side.name}")
     return True
+
+
+def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src: Path | None, *,
+                         dry_run: bool = False, version: str | None = None) -> bool:
+    """模型拉取按钮（设置页「⚡️ 自动拉取模型」）。"""
+    return _process_ipc_patch(asar, check_only, revert, puller_src, PULLER_SPEC,
+                              dry_run=dry_run, version=version)
+
+
+def process_enhance_prompt(asar: Path, check_only: bool, revert: bool, enhance_src: Path | None, *,
+                           dry_run: bool = False, version: str | None = None) -> bool:
+    """增强提示词（输入框「增强提示词」按钮，用当前选中的模型润色草稿）。"""
+    return _process_ipc_patch(asar, check_only, revert, enhance_src, ENHANCE_SPEC,
+                              dry_run=dry_run, version=version)
 
 
 # ==================== 3.14+ 原生档位配置（provider_config.json，无需内核补丁） ====================
@@ -1815,19 +2061,14 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
 #           config: { properties: {contextWindow},
 #                     optionSpecs: { reasoningLevel: { values:[...], map:"<CEL>" } } } }
 #
-#   * values → 界面档位列表（**末位即默认档**），内核 y$o/listThoughtLevels 从这里取
+#   * values → 界面档位列表（**末位即默认档**），内核 listThoughtLevels / y$o 从这里取
 #   * map    → CEL 表达式，请求发出前由 createModelOptionMapFetch 合并进请求体 JSON
 #   * 与 manualProviderModelRules 冲突（同 providerId+modelId 不能同时在两个列表，否则内核
 #     schema 校验失败、整个供应商配置降级为空）——本命令遇到冲突只报告不写入。
 #
-# 本命令把 config.json 里各模型已配的档位（旧 reasoning.variants 或已有 optionSpecs）
-# 同步进 provider_config.json，使自定义模型在新内核上真正下发档位参数。
-
 # map 直接采用「ZCode 自己会写的写法」（内置规则 / 界面手动配置生成的一致形态），
-# 保证 CEL 一定能编译通过、行为与官方路径一致：
-#   openai 兼容：thinking + enable_thinking + reasoning_effort 三键（界面手动配置即此形态）
-#   anthropic ：thinking(adaptive) + output_config.effort，关闭档发 thinking.disabled
-# 档名不在 disabled/none/enabled 之内时按原名透传（网关认识就透传、不认识自行降级）。
+# 保证 CEL 一定能编译通过、行为与官方路径一致。
+
 REASONING_MAP_OPENAI = """{
   "thinking": {
     "type": reasoningLevel == "disabled" || reasoningLevel == "none" ? "disabled" : "enabled"
@@ -2163,6 +2404,10 @@ def main() -> int:
                     help="注入模型拉取按钮：设置页「自动拉取模型」，经 preload/main IPC 读写 config，asar 重打包级")
     ap.add_argument("--puller-src", default=None,
                     help="指定注入的 zcode-model-puller.js 路径（默认用本脚本同目录自带的）")
+    ap.add_argument("--enhance-prompt", action="store_true",
+                    help="注入「增强提示词」按钮：输入框旁一键用当前选中的模型润色草稿，asar 重打包级")
+    ap.add_argument("--enhance-src", default=None,
+                    help="指定注入的 zcode-enhance-prompt.js 路径（默认用本脚本同目录自带的）")
     ap.add_argument("--prune", action="store_true",
                     help="清理安装目录里的补丁产物（旧版本归档 / 临时文件残留）")
     ap.add_argument("--deep", action="store_true",
@@ -2189,7 +2434,7 @@ def main() -> int:
         return 0
 
     asar_flags = any((args.usage_chart, args.model_width, args.tps_footer,
-                      args.thought_slider, args.model_puller))
+                      args.thought_slider, args.model_puller, args.enhance_prompt))
     mode = "检查" if args.check else ("还原" if args.revert else ("预演" if args.dry_run else "打补丁"))
     fails: list[str] = []
     results: list[tuple[str, str, bool]] = []      # (补丁名, 目标, 是否成功)
@@ -2239,6 +2484,10 @@ def main() -> int:
              lambda a: process_model_puller(a, args.check, args.revert,
                                             Path(args.puller_src) if args.puller_src else None,
                                             dry_run=args.dry_run, version=version)),
+            (args.enhance_prompt, "增强提示词注入",
+             lambda a: process_enhance_prompt(a, args.check, args.revert,
+                                              Path(args.enhance_src) if args.enhance_src else None,
+                                              dry_run=args.dry_run, version=version)),
         ]
         for enabled, title, fn in steps:
             if not enabled:

@@ -13,6 +13,7 @@ description: 逐项查看/切换 zcode-tokenspeed 的注入功能开关
 | `model_width` | 模型弹窗加宽 | 下次会话启动（字节级） |
 | `tps_footer` | TPS 状态栏 | ZCode 退出时自动应用，重启后生效 |
 | `thought_slider` | 思考强度滑条 | ZCode 退出时自动应用，重启后生效 |
+| `enhance_prompt` | 增强提示词按钮 | ZCode 退出时自动应用，重启后生效 |
 | `model_puller` | 设置页模型拉取按钮 | ZCode 退出时自动应用，重启后生效 |
 | `core_patch` | 思考档位内核补丁（仅 ≤3.11.2，3.14+ 请保持关闭） | 下次会话启动 |
 

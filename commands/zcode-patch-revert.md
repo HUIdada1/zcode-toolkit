@@ -10,13 +10,14 @@ python "<skill目录>/scripts/zcode_patcher.py" --usage-chart --revert
 python "<skill目录>/scripts/zcode_patcher.py" --model-width --revert
 python "<skill目录>/scripts/zcode_patcher.py" --tps-footer --revert
 python "<skill目录>/scripts/zcode_patcher.py" --thought-slider --revert
+python "<skill目录>/scripts/zcode_patcher.py" --enhance-prompt --revert
 python "<skill目录>/scripts/zcode_patcher.py" --model-puller --revert
 python "<skill目录>/scripts/zcode_patcher.py" --revert        # 思考等级（仅 3.11.2 及更早）
 ```
 
 要求：
 
-- 先确认 ZCode 已**完全退出**——重打包级补丁（TPS / 滑条 / 拉取按钮）还原会写 `app.asar`；
+- 先确认 ZCode 已**完全退出**——重打包级补丁（TPS / 滑条 / 增强提示词 / 拉取按钮）还原会写 `app.asar`；
   脚本会预检进程，运行中直接拒绝（退出码 2）。
 - 内核补丁还原前会校验备份指纹：若备份与当前内核不是同一版本（例如客户端升级过），脚本会**拒绝还原**
   并提示改用 `restore_clean.py`——不要用 `--force` 绕过，那会把旧版内核盖回新客户端。

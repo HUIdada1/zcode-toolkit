@@ -48,7 +48,7 @@
 @keyframes zsliderPulse{0%{transform:scale(1)}40%{transform:scale(1.28)}100%{transform:scale(1)}}
 @keyframes zsliderGlow{0%,100%{box-shadow:0 0 6px 1px rgba(125,211,252,.4)}50%{box-shadow:0 0 14px 3px rgba(125,211,252,.75)}}
 @keyframes zsliderRipple{from{opacity:.75;transform:translate(-50%,-50%) scale(.4)}to{opacity:0;transform:translate(-50%,-50%) scale(2.4)}}
-/* ---- dsh-reasoning-effort 视觉规格：渐变轨道 / 拖尾光斑 / 拖拽增辉 / max 呼吸 ---- */
+/* ---- 视觉规格：渐变轨道 / 拖尾光斑 / 拖拽增辉 / max 呼吸 ---- */
 .zslider-panel{border:1px solid rgba(127,127,127,.22)!important;border-radius:14px!important;box-shadow:0 14px 42px rgba(0,0,0,.38),0 3px 10px rgba(0,0,0,.16)!important;backdrop-filter:blur(8px)}
 .zslider-rail{background:linear-gradient(100deg,#03040a 0%,#071126 22%,#101d4c 45%,#302262 70%,#5d35a0 100%)!important;box-shadow:inset 0 1px 0 rgba(189,199,255,.15),inset 0 -1px 0 rgba(0,0,0,.55),0 3px 10px rgba(12,17,55,.34)!important}
 .zslider-flare{position:absolute;top:50%;left:var(--zp,0%);width:64px;height:40px;border-radius:50%;transform:translate(-100%,-50%);background:radial-gradient(ellipse at 100% 50%,rgba(255,255,255,.95) 0 4%,rgba(188,189,255,.8) 11%,rgba(106,87,255,.5) 28%,rgba(105,31,255,.2) 49%,transparent 74%);filter:blur(2px) saturate(1.25);mix-blend-mode:screen;transition:left 70ms linear,filter 140ms ease;pointer-events:none}
@@ -265,7 +265,7 @@
 
   // ---------- 八帧奔跑小人(滑块按钮) ----------
   // 参数化火柴人跑步循环:大腿按正弦摆动、后摆相膝弯大、手臂与对侧腿同相,身体随步频轻微起伏。
-  // 拖动越快 rate 越高(帧/秒),松手后以固定减速度自然停下,致敬 Codex / dsh-reasoning-effort。
+  // 拖动越快 rate 越高(帧/秒),松手后以固定减速度自然停下。
   const runner = { el: null, svg: null, tail: null, frame: 0, progress: 0, raf: 0, last: 0 };
   const IDLE_FRAME_MS = 90;     // 静止循环 720ms / 8 帧(dsh 规格)
   const DRAG_FRAME_MS = 52.5;   // 拖拽循环 420ms / 8 帧
@@ -466,7 +466,7 @@
     flareEl.className = "zslider-flare";
     clip.appendChild(flareEl);
     track.appendChild(clip);
-    // 滑块按钮:八帧奔跑小人(致敬 Codex/dsh-reasoning-effort),独立于裁剪层悬浮。
+    // 滑块按钮:八帧奔跑小人,独立于裁剪层悬浮。
     // 静止停在站立帧;拖动/换档时按速度播放跑步循环,松手自然减速停下。
     runner.el = document.createElement("div");
     Object.assign(runner.el.style, {

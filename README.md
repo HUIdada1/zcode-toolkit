@@ -1,154 +1,220 @@
-# zcode-tokenspeed(ZCode 插件)
+# zcode-tokenspeed · ZCode 客户端增强插件
 
-ZCode 桌面客户端的本地增强补丁插件:七个补丁覆盖模型思考档位、用量图表、输入框统计条、思考强度滑条与模型拉取。纯 Python 标准库,不依赖 Node;全部补丁幂等、可检查、可精确还原。
+给 ZCode 桌面客户端补上几件顺手的事：**自定义模型的思考档位真正生效**、**用量页图表不再截断**、
+**输入框实时 TPS 统计条**、**一键增强提示词**、**设置页一键拉取模型**。
 
-> **非官方项目**,与 ZCode(智谱)官方无任何关联。所有改动均在本地对已安装的客户端打补丁,随时可精确还原。
+纯 Python 标准库实现，不依赖 Node、不需要编译；所有改动都作用于**本地已安装的客户端文件**，
+幂等、可 `--check` 核查、可 `--revert` 精确还原、可在插件详情页逐项开关。
+
+> **非官方项目**，与 ZCode 官方无任何关联。请遵守 ZCode 软件许可协议，因使用本工具产生的一切后果由使用者自行承担。
+> 第三方组件的许可声明见 [NOTICE.md](NOTICE.md)。
+
+---
 
 ## 功能一览
 
-| 补丁 | 一句话效果 | 命令参数 |
-|---|---|---|
-| 思考档位配置（3.14+） | 自定义模型的档位真正下发到请求体:档位写进 `provider_config.json` 的 `optionSpecs.reasoningLevel`(界面档位列表 + 请求体参数都由它下发),无需内核补丁 | `--reasoning-config` |
-| 思考档位透传（≤3.11） | 老机制下的内核补丁兜底;3.14+ 会提示"本补丁不适用" | 内核补丁 `(无参数)` |
-| 用量页去截断 | 趋势图 / 饼图全量展示,不再只画 Top 6 / Top 5 | `--usage-chart` |
-| 模型弹窗加宽 | 模型浮窗 192px → 320px,长模型名不再截断 | `--model-width` |
-| TPS 状态栏 | 输入框下方居中统计条:本轮指标 + 会话累计,右键可切位置 | `--tps-footer` |
-| 思考强度滑条 | 原生下拉替换为点击弹出的吸附拖拽条,拖完即时生效;视觉规格对齐 [dsh-reasoning-effort](https://github.com/HanaAyane/dsh-reasoning-effort) | `--thought-slider` |
-| 模型拉取按钮 | 一键拉取 `/models`,已添加自动标注,勾选即写入;3.14.x 起同步 `provider_config.json` 新 schema,删除后可再次添加 | `--model-puller` |
+| # | 功能 | 效果 | 命令 | 改动位置 |
+|---|------|------|------|---------|
+| 1 | **思考档位配置** | 把各模型已配的档位写进 `provider_config.json` 的 `optionSpecs`——界面档位列表与请求体参数都由它下发（3.14+ 原生机制，**无需内核补丁**） | `--reasoning-config` | `~/.zcode/v2/provider_config.json` |
+| 2 | **思考等级透传** | ≤3.11 内核的档位兜底补丁（3.14+ 已不需要，脚本会明确提示） | 无参数 | 内核 `zcode.cjs` |
+| 3 | **用量页去截断** | 「设置 → 用量」趋势图不再只画 Top 6、饼图不再只画 Top 5 + 「其他模型」 | `--usage-chart` | `app.asar` 渲染文件 |
+| 4 | **模型弹窗加宽** | 模型选择浮窗 192px → 320px，长模型名不再被截断 | `--model-width` | `app.asar` 主 bundle |
+| 5 | **TPS 状态栏** | 输入框下方常驻统计条：本轮（首 token / tok/s / out）+ 会话累计（轮数 / 输入 / 命中率 / 累出），空会话空态常驻，右键可切位置 | `--tps-footer` | `app.asar` 注入脚本 |
+| 6 | **思考强度滑条** | 工具栏「思考 · 档名」入口，点击弹出吸附拖拽条，拖完走原生链路即时生效 | `--thought-slider` | `app.asar` 注入脚本 |
+| 7 | **增强提示词** | 输入框旁「增强提示词」按钮：一键用**当前选中的模型**把草稿改写得更清晰具体，可「恢复原文」 | `--enhance-prompt` | `app.asar` 注入脚本 + IPC 桥 |
+| 8 | **模型拉取按钮** | 设置页「⚡️ 自动拉取模型」：拉取供应商 `/models`、勾选即写入，新供应商一步到位（自动建条目） | `--model-puller` | `app.asar` 注入脚本 + IPC 桥 |
 
-通用开关:`--check`(只读核实) · `--revert`(还原) · `--dry-run`(只报告改动不写盘) · `--verbose`(打印探测细节)。
-打补丁/还原前会**预检 ZCode 进程**,运行中直接拒绝(退出码 2);`--check` 与 `--dry-run` 不受限。
-备份带**版本指纹**:客户端升级后旧备份自动归档,还原时若与当前版本不符会拒绝执行,避免把旧内核/asar 盖回新客户端。
+命令行版拉模型（不动客户端文件，直接同步配置）：
 
-**TPS 状态栏**(`--tps-footer`)——`● 32 tok/s · out 1.7k │ 第 8 轮 │ 输入 45.2k · 命中 38.1k · 平均命中 84% · 累出 12.3k`:左组本轮即时指标(首 token / tok/s / out),右组会话累计(轮数 / 累计输入 / 累计命中与平均命中率 / 累计输出),组间竖线分隔;流式中实时刷新,空会话空态常驻,右键可切「输入框工具栏 / 会话顶部 sticky」。
+```bash
+python skills/zcode-tokenspeed/scripts/model_pull.py --all [--dry-run] [--refresh]
+```
 
-**思考强度滑条**(`--thought-slider`)——工具栏常驻「思考 · 档名」入口(迷你电量条),点击弹出吸附拖拽条:八帧奔跑小人滑块(拖得越快跑得越快,松手减速停下)、换档涟漪、填充弹性扫入、刻度级联弹入;视觉规格对齐 [HanaAyane/dsh-reasoning-effort](https://github.com/HanaAyane/dsh-reasoning-effort):深蓝→紫渐变轨道、滑块左侧拖尾光斑、拖拽增辉、max 档轨道呼吸泛光,深浅主题各自适配;档位取自模型实际配置(配几档吸几档),写档走原生链路,与原生状态双向同步,会话内即时生效。
+**通用开关**：`--check` 只读核查 · `--revert` 还原 · `--dry-run` 只报告改动不写盘 ·
+`--verbose` 打印探测细节 · `--force` 跳过备份指纹校验（慎用）· `--prune` 清理补丁产物（`--deep` 连当前备份一起清）。
 
-**模型拉取按钮**(`--model-puller`)——3.14.x 的界面模型列表以 `<dataBaseDir>/.zcode/v2/provider_config.json` 为唯一事实源(`dataBaseDir` 从 `~/.zcode/v2/setting.json` 解析,数据目录迁移到 F 盘等场景也能正确定位),本补丁读写时自动合并/回写新 schema 的 `personalModelIds`/`modelOrder` 与模型规则,同时保持旧 `config.json` 元数据一致;界面删除模型后再次拉取可正常重加,不再出现「已添加却写不进列表」。
+---
 
-每个补丁都支持 `--check`(只读查状态)与 `--revert`(精确还原),互不干扰、可单独装卸。
-另有通用开关:`--dry-run`(只报告改动不写盘)、`--verbose`(打印探测细节)、`--force`(跳过备份指纹校验,慎用)、
-`--prune`(清理安装目录里的补丁产物;加 `--deep` 连当前备份一起清,之后无法 `--revert`);
-每次执行结束打印「执行汇总」表(补丁 × 目标 × 成功/失败),失败项返回退出码 1;
-打补丁/还原前会预检 ZCode 进程,运行中直接拒绝(退出码 2)。
+## 安装
 
-**回归测试**(纯标准库 unittest,无需 pytest):
+### 方式一：作为 ZCode 插件（推荐）
+
+```bash
+git clone https://github.com/c80361619/zCode-Multi-functional-plugin.git
+```
+
+把克隆得到的目录放进 ZCode 的插件目录，重启 ZCode 即可：
+
+| 平台 | 插件目录 |
+|---|---|
+| Windows | `%USERPROFILE%\.zcode\plugins\`（数据目录迁移过的用户是 `<dataBaseDir>\.zcode\plugins\`） |
+| macOS / Linux | `~/.zcode/plugins/` |
+
+安装后在新任务里可以用斜杠命令：
+
+| 命令 | 作用 |
+|---|---|
+| `/zcode-patch-status` | 只读核查所有补丁状态 |
+| `/zcode-patch-apply` | 注入指定补丁 |
+| `/zcode-patch-revert` | 还原指定补丁 |
+| `/zcode-patch-toggle` | 查看/切换各项开关（也可直接在插件详情页拨开关） |
+
+开关拨动并保存后：配置类补丁（档位配置）与字节级补丁（用量图 / 弹窗加宽）下次会话启动即生效；
+重打包级补丁（状态栏 / 滑条 / 增强提示词 / 拉取按钮）会在 **ZCode 退出时**由看护自动应用。
+
+### 方式二：手动跑脚本
+
+```bash
+# 1) 只读核查（可放心先跑，不会改任何文件）
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --reasoning-config --check
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --check
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --usage-chart --check
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --model-width --check
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --tps-footer --check
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --thought-slider --check
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --enhance-prompt --check
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --model-puller --check
+
+# 2) 打补丁（先完全退出 ZCode；脚本会预检进程，运行中直接拒绝）
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --reasoning-config
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --tps-footer --thought-slider --enhance-prompt --model-puller
+
+# 3) 还原（随时可退，精确到字节）
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --tps-footer --revert
+```
+
+安装位置自动探测（运行中进程 → 注册表 → 常见目录，跨 Windows / macOS / Linux）；
+探测不到就把安装根目录当参数传入：
+
+```bash
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py "D:\ZCode"                  # Windows
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py "/Applications/ZCode.app"  # macOS
+```
+
+---
+
+## 环境要求
+
+| 项 | 要求 |
+|---|---|
+| Python | ≥ 3.10（仅标准库，无需 pip 安装任何依赖） |
+| ZCode | 3.11.2 / 3.14.1 / 3.14.3 实测通过；其它版本脚本会**拒绝盲改并说明原因** |
+| 平台 | Windows 实测；macOS / Linux 逻辑支持（macOS 改 `.app` 会破坏代码签名，异常时 `sudo codesign --force --deep --sign - /Applications/ZCode.app`） |
+| 权限 | Program Files / `/Applications` 下需要管理员或 sudo |
+
+---
+
+## 思考档位怎么用（按版本分流）
+
+ZCode 对「非内核白名单」的自定义模型，档位能选中但参数不一定下发到请求体。**机制在 3.14 换了**：
+
+| 客户端版本 | 档位从哪来 | 参数怎么下发 | 该跑什么 |
+|---|---|---|---|
+| **≥ 3.14** | `provider_config.json` → `providerModelRules[].config.optionSpecs.reasoningLevel.values` | 同一条规则的 `optionSpecs.reasoningLevel.map`（CEL 表达式），请求发出前由内核合并进请求体 | `--reasoning-config`（**不需要内核补丁**） |
+| ≤ 3.11 | `config.json` 的 `reasoning.variants` | 内核查表 `providerOptionsByLevel`（自定义模型为空）→ 需补丁兜底 | 内核补丁 + 手配 `variants` |
+
+判别方法：跑 `zcode_patcher.py --check`，输出「该内核使用 3.14+ 原生档位机制（optionSpecs），本补丁不适用」即为 ≥3.14。
+
+```bash
+# 3.14+：先看现状（哪些模型已配档位、哪些已在界面手动配置过）
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --reasoning-config --check
+# 写入（先完全退出 ZCode）
+python skills/zcode-tokenspeed/scripts/zcode_patcher.py --reasoning-config
+```
+
+它会以 `config.json` 为基准，把每个模型的档位写进 `provider_config.json`：
+
+- `values` = 界面档位列表，**末位即默认档**（`defaultVariant` 会自动排到末位）
+- `map` = 用 ZCode 自己会写的那套 CEL（openai 兼容：`thinking` + `enable_thinking` + `reasoning_effort`；
+  anthropic：`thinking(adaptive)` + `output_config.effort`），保证一定能编译通过
+- 已在界面「手动配置」过的模型会**自动跳过**——内核 schema 禁止同一模型同时出现在两个规则列表，
+  重复声明会让整份供应商配置降级为空
+- 档名不在 `disabled/none/enabled` 之内时按原名透传（网关认识就透传、不认识自行降级）
+
+---
+
+## 增强提示词怎么用
+
+在输入框工具栏点「**增强提示词**」：
+
+1. 取当前草稿 → 经 preload 桥 / main handler，用**你当前选中的那个模型**调一次补全
+2. 提示词要求「保持原语言、只输出改写后的提示词、不回答问题、不加解释」
+3. 结果写回输入框；按钮临时变成「**恢复原文**」，20 秒内可一键还原
+
+失败时会提示具体原因（未配置供应商 / 桥不可用 / 网关报错 / 超时）。
+渲染层诊断对象：`window.__zenhanceDiag`。
+
+---
+
+## 工作原理（简述）
+
+- **asar 补丁**：直接解析 `app.asar` 头（不依赖任何 Node/asar 工具），两种手法——
+  同长度字节级原地覆盖（用量图 / 弹窗加宽），与保留 unpacked 原生模块的精确重打包
+  （状态栏 / 滑条 / 增强提示词 / 拉取按钮，改动条目重算 SHA256 integrity，写临时文件回读校验后原子替换）。
+  重打包**不把整包读进内存**：未改动条目按 1MB 分块流式搬运（实测 312MB 包峰值分配 80MB）。
+- **IPC 注入**：preload / main 里的注入段用**标记定界**（`/*zp:begin:<块名>*/ … /*zp:end:<块名>*/`），
+  多个补丁共用同一个锚点也能各自独立装卸、互不干扰。
+- **内核补丁**：`zcode.cjs` 是 esbuild 压缩产物、符号名随版本重排；按「完整函数原文」做多版本锚点匹配，
+  恰好唯一命中才动手，新版本可 `--extract` 按结构特征自动提取锚点。
+- **安全兜底**：备份带**版本指纹**（`*.bak.meta.json`）；客户端升级后旧备份自动归档（`.stale-<时间>`），
+  还原时若当前文件与备份不是同一版本会**拒绝执行**，避免把旧内核/asar 盖回新客户端。
+
+---
+
+## 常见问题
+
+| 现象 | 处理 |
+|---|---|
+| 打补丁提示「请完全退出 ZCode」 | 托盘右键退出（关窗口不算），再重跑 |
+| 升级客户端后补丁失效 | 重跑对应命令即可；`--check` 先看状态，档位配置跑 `--reasoning-config` |
+| 3.14+ 跑内核补丁提示「不适用」 | 预期行为——档位改走 `--reasoning-config` |
+| 档位能选但请求无 thinking | 3.14+ 看 `--reasoning-config --check` 是否已写入；≤3.11 确认内核补丁已打且已重启 |
+| 状态栏 / 滑条 / 增强按钮不出现 | 渲染 console 看 `window.__ztpsDiag` / `window.__zsliderDiag` / `window.__zenhanceDiag` |
+| 增强提示词报「没找到可用的模型」 | 先在设置里配好供应商与 API Key |
+| 客户端起不来 | `python skills/zcode-tokenspeed/scripts/restore_clean.py --latest` 从干净备份整包恢复 |
+| 想清理安装目录里的备份 | `--prune`（只清旧归档与临时文件）/ `--prune --deep`（连当前备份一起清） |
+
+---
+
+## 目录结构
+
+```
+.zcode-plugin/plugin.json                     插件清单（含 8 个功能开关的声明）
+commands/                                     四个斜杠命令
+hooks/hooks.json                              SessionStart 钩子（调用 sync.py 同步开关）
+skills/zcode-tokenspeed/
+  SKILL.md                                    执行流程 + 逆向笔记 + 排障（AI 代执行入口）
+  scripts/
+    zcode_patcher.py                          主工具：八个补丁
+    zcode-tps.js                              TPS 状态栏注入脚本（ServicePort 事件流）
+    zcode-thought-slider.js                   思考强度滑条注入脚本
+    zcode-enhance-prompt.js                   增强提示词按钮注入脚本
+    zcode-model-puller.js                     模型拉取按钮前端脚本
+    model_pull.py                             CLI：拉取模型、按元数据刷新已有模型
+    sync.py                                   开关同步（SessionStart hook 调用）
+    apply_after_exit.py                       退出后看护：等 ZCode 退出 → 应用/还原 → 重启
+    restore_clean.py                          紧急整包还原
+    tap_proxy.py                              请求捕获代理：看真实发出的请求体
+    probe_max_tokens.py                       探测模型真实输出上限（识别网关静默钳制）
+tests/test_patcher.py                         回归测试
+NOTICE.md                                     第三方组件与许可声明
+```
+
+---
+
+## 开发
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-覆盖 asar 头解析与重打包(offset 重排、unpacked 条目)、integrity 精确同步、内核补丁的字节级改写与
-备份指纹、3.14+ 档位配置迁移与冲突跳过、注入代码语法、重打包峰值内存约束;装了 ZCode 时还会**只读校验真实 app.asar**
-的逐条目 integrity(约 2.7 万条)。CI 在 Python 3.10/3.12/3.13 上跑这套用例。
+覆盖 asar 头解析与重打包（offset 重排、unpacked 条目、峰值内存约束）、integrity 精确同步、
+内核补丁的字节级改写与备份指纹、3.14+ 档位配置迁移与冲突跳过、注入块共存与迁移、
+生成的注入代码语法（`node --check`）；本机装了 ZCode 时还会**只读校验真实 app.asar 的逐条目 integrity**。
+CI（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 / 3.13 上跑这套用例。
 
-## 快速开始
+---
 
-要求 [Python](https://www.python.org/) ≥ 3.10(仅标准库,无第三方依赖)。
+## 许可
 
-**方式一:安装插件**(推荐)
-
-```bash
-git clone https://github.com/c80361619/zCode-Multi-functional-plugin.git
-```
-
-然后把克隆得到的目录放入 ZCode 的插件目录(Windows 默认 `~/.zcode/plugins/`,即 `C:\Users\<用户名>\.zcode\plugins\`;数据目录迁移过的用户是 `<dataBaseDir>\.zcode\plugins\`),重启 ZCode 即完成安装。安装后在新任务里:
-
-- 用斜杠命令:`/zcode-patch-status`(只读检查)、`/zcode-patch-apply`(注入)、`/zcode-patch-revert`(还原)、`/zcode-patch-toggle`(逐项开关);
-- 或直接点名「zcode-tokenspeed」说明要哪个功能。
-
-**方式二:直接跑脚本**(不想装插件,手动打补丁)
-
-```bash
-git clone https://github.com/c80361619/zCode-Multi-functional-plugin.git
-cd zCode-Multi-functional-plugin
-
-python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --check           # 只读检查(可放心先跑)
-python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer      # 打 TPS 统计条
-python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --thought-slider  # 打思考强度滑条
-python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --model-puller    # 打模型拉取按钮
-python "skills/zcode-tokenspeed/scripts/zcode_patcher.py" --tps-footer --revert   # 还原
-```
-
-安装位置自动探测(运行中进程 → 注册表 → 常见目录),也可显式传参:`python zcode_patcher.py "D:\ZCode"`。
-
-> 重打包级补丁(TPS / 滑条 / 拉取按钮)在 ZCode 运行中会被文件锁挡住,**打补丁前完全退出 ZCode**(托盘右键退出,不是关窗口),打完重启生效。每个补丁首次执行自动生成整包备份(`.bak`)与逐字节记录(sidecar json),还原精确到字节。
-
-## 打完补丁后怎么用
-
-| 补丁 | 在哪里用 |
-|---|---|
-| TPS 状态栏 | 打开任意会话,输入框下方自动出现统计条;**右键**它可切换「输入框工具栏 / 会话顶部 sticky」位置 |
-| 思考强度滑条 | 输入框工具栏的「思考 · 档名」入口(原生下拉已被替换),点击弹出拖拽条,拖到目标档位松手即生效;←/→ 键可微调 |
-| 模型拉取按钮 | 「设置 → 模型供应商」新建/编辑自定义供应商,填好 **Base URL 和 API Key** 后,点旁边的「⚡️ 自动拉取模型」→ 弹窗里勾选要的模型(新模型默认勾选,已添加的标注「已添加」)→ 点「确认添加并保存」,模型立即出现在列表 |
-| 用量页去截断 / 模型弹窗加宽 | 无需操作,重启 ZCode 后自动生效 |
-
-**模型拉取的典型流程**(第一次添加供应商):
-
-1. 设置 → 模型供应商 → 添加自定义供应商;
-2. 填名称、Base URL(如 `https://api.example.com/v1`)、API Key;
-3. 点「⚡️ 自动拉取模型」——**不用先保存供应商**,补丁会自动创建条目并判定 API 协议;
-4. 弹窗勾选模型 → 确认 → 模型列表即刻出现,聊天输入框里就能选到。
-
-## 插件开关
-
-「设置 → 插件管理 → 已安装 → 点开本插件」的**配置**区有 7 个开关,分别控制七个补丁。拨动并点「保存配置」后,插件在下次会话启动时自动把客户端同步过去,不用手打命令。
-
-- **只同步你显式保存过的开关**——没拨过的一律不碰,首次安装不会自动改动客户端;
-- 生效时机:档位配置是配置侧写入、用量图表/弹窗加宽是字节级改写,下次会话启动即生效;TPS 状态栏、滑条、拉取按钮要重写 `app.asar`,由看护在 **ZCode 退出时自动应用**;
-- `core_patch`(思考档位内核补丁)只对 ZCode 3.11.2 及更早有效,3.14.x 用原生 `optionSpecs` 机制,保持关闭即可;
-- 详情页没有「配置」区(渲染问题)时,直接写 `~/.zcode/cli/config.json` → `plugins.options["zcode-tokenspeed@dev-default-22da16fd"]`,或打 `/zcode-patch-toggle` 让 AI 代改。
-
-## 仓库结构
-
-```
-.zcode-plugin/plugin.json                    清单(含功能开关的 userConfig 声明)
-skills/zcode-tokenspeed/SKILL.md             执行流程 + 逆向笔记 + 排障(AI 代执行入口)
-skills/zcode-tokenspeed/scripts/
-  zcode_patcher.py                           主工具:七个补丁(解析/重打包 asar 不依赖 Node)
-  zcode-tps.js                               TPS 统计条注入脚本(ServicePort 事件流)
-  zcode-thought-slider.js                    思考强度滑条注入脚本(奔跑小人滑块)
-  zcode-model-puller.js                      模型拉取按钮前端脚本
-  sync.py                                    开关同步(SessionStart hook 调用)
-  apply_after_exit.py                        退出后看护:等 ZCode 退出 → 应用重打包级补丁
-  model_pull.py                              CLI 拉模型:不动 asar,直接同步 config.json + provider_config.json
-  probe_max_tokens.py                        探测网关真实输出上限(识别「静默钳制」)
-  tap_proxy.py                               请求捕获代理:验证思考参数是否真发出
-  restore_clean.py                           紧急整包还原(客户端异常时无需重装)
-hooks/hooks.json                             SessionStart 钩子
-commands/                                    /zcode-patch-status / apply / revert / toggle
-```
-
-## 版本与平台
-
-| 平台 | 支持 | 备注 |
-|---|---|---|
-| Windows | ✅ 实测 | 打 asar 补丁前需完全退出 ZCode;Program Files 下需管理员终端 |
-| macOS | ✅ 逻辑支持 | 修改 `.app` 会破坏签名,启动异常时重新 ad-hoc 签名即可 |
-| Linux | ✅ 逻辑支持 | 探测 `/opt`、`/usr/share` |
-
-对未知版本 / 未知结构,脚本一律拒绝盲改并报告原因,不会写坏文件。开发与实测基于 **ZCode 3.11.2 / 3.14.1(Windows)**;3.14.x 起界面供应商列表由 `<dataBaseDir>/.zcode/v2/provider_config.json` 驱动,模型拉取补丁与 CLI 已同步适配,旧版客户端不受影响。
-
-## 常见问题(FAQ)
-
-**Q:补丁打了但界面没变化?**
-确认两点:① 打补丁时 ZCode 是否完全退出(运行中会被文件锁挡住,命令会报「文件被占用」);② 打完后是否重启了 ZCode。可用 `--check` 查看各补丁状态。
-
-**Q:点「自动拉取模型」提示拉取失败?**
-检查 Base URL 是否可直接访问 `<baseURL>/models`(部分网关要求 Key,补丁会自动带上表单里的 Key);URL 结尾带不带 `/v1` 都可以,补丁会自动尝试多种路径组合。
-
-**Q:拉取成功但模型列表里没有?**
-确认用的是最新版代码(2026-09-22 之后的提交修复了 3.14.x 的 `provider_config.json` 适配);旧版脚本在新版客户端上会出现「写入成功但界面不显示」。重跑 `--model-puller` 更新注入即可,无需先还原。
-
-**Q:供应商列表全部消失?**
-查看 `<dataBaseDir>/.zcode/v2/logs/` 最新日志,若出现「Personal Provider Config 加载失败」,说明配置文件被旧版脚本写坏(内置供应商污染或智能/手动规则冲突)。用 `provider_config.json.puller-bak` 或同目录 `.conflict-bak*` 备份覆盖回去,再重启 ZCode;并确保补丁已更新到最新版。
-
-**Q:ZCode 升级后补丁失效?**
-升级会覆盖 `app.asar`,重跑对应补丁命令即可(内核补丁可用 `--extract` 自动提取新版本锚点)。
-
-**Q:想全部还原?**
-逐个 `--revert`,或用 `restore_clean.py` 从干净备份整包恢复(客户端异常时无需重装 ZCode)。
-
-## License
-
-[MIT](./LICENSE)
+[MIT](LICENSE) © 2026 c80361619。第三方组件与设计参考的声明见 [NOTICE.md](NOTICE.md)。

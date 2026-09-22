@@ -21,7 +21,7 @@ ZCode 请求捕获代理（tap proxy）——验证思考等级等参数是否�
   # 发一轮对话，本工具会把请求体与流内统计打出来
 
   python tap_proxy.py --target https://api.deepseek.com --capture cap.jsonl
-  python tap_proxy.py --target http://211.154.25.123:7863 --only chat   # 只看对话请求
+  python tap_proxy.py --target http://127.0.0.1:8000 --only chat   # 只看对话请求
 
 选项：
   --listen HOST:PORT   监听地址（默认 127.0.0.1:7864）

@@ -1,5 +1,5 @@
 /**
- * vendored from https://github.com/HHQ-666/zcode-model-puller (MIT License, (c) HHQ-666)
+ * MIT License — Copyright (c) HHQ-666（完整许可声明见仓库根目录 NOTICE.md）
  * 由 zcode_patcher.py --model-puller 注入到 out/renderer/；配套的 preload 桥与 main IPC handler
  * 在 patcher 内置（锚点：exposeInMainWorld("zcode",{ / SaveMcpToUserDirectory）。
  */

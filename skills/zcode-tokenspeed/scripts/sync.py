@@ -22,7 +22,9 @@ HERE = Path(__file__).resolve().parent
 PATCHER = HERE / "zcode_patcher.py"
 WATCHDOG = HERE / "apply_after_exit.py"
 CONFIG = Path.home() / ".zcode" / "cli" / "config.json"
-PLUGIN_ID = "zcode-tokenspeed@dev-default-22da16fd"
+# 插件 id 会随安装方式变化（本地 dev-default-xxxx、市场安装的 id 等），
+# 因此按前缀匹配而不是写死某个 id —— 换台机器/换安装方式也能正确定位配置。
+PLUGIN_ID_PREFIX = "zcode-tokenspeed"
 LOG = HERE / "_sync.log"
 
 # 配置键 -> (zcode_patcher.py 参数, 是否重打包级)
@@ -31,6 +33,8 @@ PATCHES = [
     ("usage_chart", ["--usage-chart"], False),
     ("model_width", ["--model-width"], False),
     ("tps_footer", ["--tps-footer"], True),
+    ("thought_slider", ["--thought-slider"], True),
+    ("enhance_prompt", ["--enhance-prompt"], True),
     ("model_puller", ["--model-puller"], True),
     ("core_patch", [], False),                             # ≤3.11 内核补丁
 ]
@@ -49,12 +53,12 @@ def log(msg: str) -> None:
 
 
 def _search(node, path="", depth=0):
-    """在配置树里找本插件的配置对象（键为插件 id 的那一层）。"""
+    """在配置树里找本插件的配置对象（键以插件名前缀开头的那一层）。"""
     if depth > 6 or not isinstance(node, dict):
         return None
-    entry = node.get(PLUGIN_ID)
-    if isinstance(entry, dict) and entry:
-        return entry, f"{path}.{PLUGIN_ID}"
+    for key, val in node.items():
+        if isinstance(val, dict) and val and str(key).startswith(PLUGIN_ID_PREFIX):
+            return val, f"{path}.{key}"
     for key, val in node.items():
         if isinstance(val, dict):
             got = _search(val, f"{path}.{key}", depth + 1)

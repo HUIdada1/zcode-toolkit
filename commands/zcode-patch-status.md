@@ -11,6 +11,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --usage-chart --check
 python "<skill目录>/scripts/zcode_patcher.py" --model-width --check
 python "<skill目录>/scripts/zcode_patcher.py" --tps-footer --check
 python "<skill目录>/scripts/zcode_patcher.py" --thought-slider --check
+python "<skill目录>/scripts/zcode_patcher.py" --enhance-prompt --check
 python "<skill目录>/scripts/zcode_patcher.py" --model-puller --check
 ```
 

@@ -1,6 +1,6 @@
 ---
 name: zcode-tokenspeed
-description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①思考档位配置（3.14+ 原生 optionSpecs，无需内核补丁）②思考档位透传（≤3.11 内核补丁）③用量页去截断（趋势图/饼图全量）④模型弹窗加宽 ⑤TPS 状态栏（输入框统计条：本轮指标+会话累计）⑥思考强度吸附滑条 ⑦设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tokenspeed」时才加载；用户只是泛泛提到思考等级、用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
+description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①思考档位配置（3.14+ 原生 optionSpecs，无需内核补丁）②思考档位透传（≤3.11 内核补丁）③用量页去截断（趋势图/饼图全量）④模型弹窗加宽 ⑤TPS 状态栏（输入框统计条：本轮指标+会话累计）⑥思考强度吸附滑条 ⑦增强提示词按钮（一键润色输入框草稿）⑧设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tokenspeed」时才加载；用户只是泛泛提到思考等级、用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
 ---
 
 # ZCode 客户端补丁工具
@@ -20,6 +20,7 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 | ④ TPS 状态栏 | 需要 | 需要 |
 | ⑤ 模型拉取按钮 | 需要 | 需要，模板已按 `optionSpecs` 新格式写入 |
 | ⑥ 思考强度滑条 | 需要 | 需要 |
+| ⑦ 增强提示词 | —（新功能） | 需要：按钮经 preload 桥 / main handler 用当前选中的模型调一次补全；提示词模板内置 |
 | ⑦ 模型弹窗加宽 / 用量图 / 拉取按钮的重打包注入 | — | 升级会整体覆盖 app.asar，三个重打包级注入（④⑥⑤）需重跑 |
 
 - 3.14.x 下**不要**再跑思考等级内核补丁（`python zcode_patcher.py` 不带参数那条）：脚本会明确提示
@@ -46,7 +47,7 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 
 ### 插件开关（配置区）
 
-插件在 ZCode 的「设置 → 插件管理 → 已安装 → 点开插件」详情页里声明了 7 个开关。拨动开关并点「保存配置」后，插件会在**下次会话启动时**自动把客户端同步到该状态，不需要手动跑命令：
+插件在 ZCode 的「设置 → 插件管理 → 已安装 → 点开插件」详情页里声明了 8 个开关。拨动开关并点「保存配置」后，插件会在**下次会话启动时**自动把客户端同步到该状态，不需要手动跑命令：
 
 | 开关 | 控制的功能 | 生效时机 |
 |---|---|---|
@@ -55,6 +56,7 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 | 模型弹窗加宽 | `--model-width` | 下次会话启动（同上） |
 | TPS 状态栏 | `--tps-footer` | ZCode 退出时自动应用，下次启动生效 |
 | 思考强度滑条 | `--thought-slider` | ZCode 退出时自动应用，下次启动生效 |
+| 增强提示词按钮 | `--enhance-prompt` | ZCode 退出时自动应用，下次启动生效 |
 | 设置页模型拉取按钮 | `--model-puller` | ZCode 退出时自动应用，下次启动生效 |
 | 思考档位内核补丁（旧版专用） | 无参数 | 仅 ≤3.11.2 需要；3.14.x 请保持关闭 |
 
@@ -88,9 +90,10 @@ python "<skill目录>/scripts/zcode_patcher.py" --tps-footer
 python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 ```
 
-> 本机另有一条独立路径：计划任务 `ZCodePatchApply` 指向本地原仓库的 `scripts/_apply_after_exit.py`（硬编码 `D:/ZCode`，退出后注入 TPS + 拉取按钮并重启 ZCode）。它与插件机制互不干扰；要取消：`schtasks /Delete /TN ZCodePatchApply /F`。
+> 也可以自己挂一条计划任务调用 `scripts/apply_after_exit.py`（它自行探测安装位置，
+> 退出后按期望状态应用补丁并重启 ZCode）；不需要时删掉该任务即可。
 
-七个补丁，均幂等、可检查、可还原、ZCode 升级后需重打：
+八个补丁，均幂等、可检查、可还原、ZCode 升级后需重打：
 
 | 能力 | 说法 | 命令 | 改哪里 |
 |---|---|---|---|
@@ -100,6 +103,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 | 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：本轮指标 + 会话累计（第 N 轮/输入/命中+平均命中率/累出） | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 思考强度滑条 | 工具栏「思考 · 档名」入口，点击弹出吸附拖拽条（动效）；原生下拉隐藏，拖完即时生效 | `python zcode_patcher.py --thought-slider [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py --model-width [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
+| **增强提示词** | 输入框旁一键用当前选中模型润色草稿（可恢复原文） | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
 两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --model-width --tps-footer --thought-slider --model-puller`。
@@ -120,6 +124,8 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
    - `python zcode_patcher.py --tps-footer --check`：index.html 是否找到、注入状态。
    - `python zcode_patcher.py --thought-slider --check`：滑条脚本注入状态。
    - `python zcode_patcher.py --model-puller --check`：四组件（renderer / index 挂载 / preload 桥 / main handler）逐个是否就位。
+   - `python zcode_patcher.py --enhance-prompt --check`：同上四组件（增强提示词与拉取按钮共用 preload/main 锚点，
+     注入段按 `/*zp:begin:<块名>*/` 标记定界，两者可独立装卸、互不干扰）。
    - 脚本对「表达式出现次数 ≠1」「锚点不唯一」等情况一律拒绝盲改并报告原因——报告即结论，不要绕过。
 3. **确认备份就绪并展示还原命令**（打补丁前必须完成，AI 代执行时明确提示用户保存还原命令）：
    - 档位配置：首次写入自动生成 `provider_config.json.reasoning-bak`
@@ -173,6 +179,7 @@ python zcode_patcher.py --model-width --check
 python zcode_patcher.py --tps-footer --check
 python zcode_patcher.py --thought-slider --check
 python zcode_patcher.py --model-puller --check
+python zcode_patcher.py --enhance-prompt --check
 ```
 
 失配的按「自助使用流程」重打；思考等级补丁在 ≤3.11 新内核上先 `--extract` 确认锚点可提取。
