@@ -845,6 +845,7 @@ let kt=(y)=>/anthropic/i.test(String(y))?"anthropic-messages":(/responses/i.test
 for(let ent0 of Object.entries(t.provider||{})){
 let pid=ent0[0],pdata=ent0[1];
 if(!pdata||typeof pdata!="object")continue;
+if(String(pid).startsWith("builtin:"))continue;
 let models=pdata.models||{};
 let ids=Object.keys(models);
 let rule=byId[pid];
