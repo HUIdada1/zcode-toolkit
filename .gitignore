@@ -31,3 +31,9 @@ probe-max-tokens*.jsonl
 .DS_Store
 Thumbs.db
 apply_after_exit.log
+
+# 本地 agent / 工具工作目录
+.workbuddy-ai/
+.box-agent/
+.box-agent-scratch/
+NVIDIA Corporation/
