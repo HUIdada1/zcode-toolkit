@@ -864,12 +864,18 @@ if(pdata.kind)c.api.type=kt(pdata.kind);
 c.personalModelIds=ids.slice();
 c.modelOrder=ids.slice();
 let oldRules={},keep=[];
+let manual=new Set();
+let manualArr=(pc.config&&pc.config.modelConfigRules&&pc.config.modelConfigRules.manualProviderModelRules)||[];
+for(let m of manualArr){
+if(m&&m.modelId)manual.add(m.providerId+"/"+m.modelId)
+}
 for(let m of mrules){
 if(m&&m.providerId===pid){oldRules[m.modelId]=m;continue}
 keep.push(m)
 }
 for(let mid of ids){
-if(oldRules[mid]){keep.push(oldRules[mid]);continue}
+if(oldRules[mid]&&!manual.has(pid+"/"+mid)){keep.push(oldRules[mid]);continue}
+if(manual.has(pid+"/"+mid))continue;
 let ent=models[mid]||{};
 keep.push({modelId:mid,providerId:pid,config:{properties:{contextWindow:(ent.limit&&ent.limit.context)||1000000}}})
 }

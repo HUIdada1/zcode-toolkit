@@ -314,18 +314,28 @@ def sync_provider_config(cfg: dict) -> None:
         c["personalModelIds"] = list(ids)
         c["modelOrder"] = list(ids)
         # 该供应商的模型规则：保留既有（界面手改的 contextWindow 等），缺失才补，
-        # 已删除模型的规则随之移除；其它供应商与 account 级规则原样不动
+        # 已删除模型的规则随之移除；其它供应商与 account 级规则原样不动。
+        # 注意：同一模型不能同时出现在 providerModelRules（智能规则）与
+        # manualProviderModelRules（界面手动配置）里，否则内核 schema 校验失败、
+        # 整个供应商配置降级为空——手动配置过的模型跳过，不补智能规则。
         old_rules = {m.get("modelId"): m for m in mrules
                      if isinstance(m, dict) and m.get("providerId") == pid}
+        # 冲突检测是全局的（内核 schema 按 providerId+modelId 全局查重），
+        # 任何供应商的手动配置都会让同名模型不能再补智能规则
+        manual_ids = {f"{m.get('providerId')}/{m.get('modelId')}" for m in
+                      (conf.get("modelConfigRules", {}).get("manualProviderModelRules") or [])
+                      if isinstance(m, dict)}
         mrules[:] = [m for m in mrules
                      if not (isinstance(m, dict) and m.get("providerId") == pid)]
         for mid in ids:
-            if mid in old_rules:
+            if mid in old_rules and f"{pid}/{mid}" not in manual_ids:
                 mrules.append(old_rules[mid])
-            else:
-                ctx = ((models.get(mid) or {}).get("limit") or {}).get("context") or 1000000
-                mrules.append({"modelId": mid, "providerId": pid,
-                               "config": {"properties": {"contextWindow": ctx}}})
+                continue
+            if f"{pid}/{mid}" in manual_ids:
+                continue
+            ctx = ((models.get(mid) or {}).get("limit") or {}).get("context") or 1000000
+            mrules.append({"modelId": mid, "providerId": pid,
+                           "config": {"properties": {"contextWindow": ctx}}})
     try:
         shutil.copy2(pc_path, pc_path.with_name(pc_path.name + ".puller-bak"))
     except Exception:
