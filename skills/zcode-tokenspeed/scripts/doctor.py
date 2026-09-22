@@ -409,9 +409,10 @@ def check_options() -> bool:
     hr("5. 插件开关是否已保存")
     saved = _saved_options()
     if not saved:
-        print(f"{BAD} config.json 的 plugins.options 里没有 {PLUGIN_NAME}* —— 从未保存过配置")
-        print("       → 点开插件 → 高级信息 → 配置 → 拨开开关 → 点「保存配置」")
-        print(f"{WARN} 同步脚本只同步「显式保存过的开关」；没保存过就完全不动客户端文件")
+        print(f"{INFO} config.json 的 plugins.options 里没有 {PLUGIN_NAME}* —— 从未保存过配置")
+        print("       **这不是故障**：同步脚本会退回插件清单声明的默认值（全开）自动注入，")
+        print("       所以装完重启、开个新会话就能用，不需要打开配置页。")
+        print("       想关掉个别功能，再到「高级信息 → 配置」拨成关并保存（保存值优先于默认值）。")
         return False
     print(f"{INFO} 已保存的开关：")
     repack_on = []
@@ -638,15 +639,15 @@ def verdict(py_ok: bool, zcode_ok: bool, has_plugin: bool, enabled: bool,
         print("  → 「设置 → 插件 → 管理已安装」打开开关，然后开一个新会话。")
         return
     if not saved:
-        print("★ 卡点：插件已启用，但**配置从未保存过**。")
-        print("  同步脚本只同步「用户显式保存过的开关」，没保存过就完全不动客户端文件。")
-        print("  → 点开插件 → 高级信息 → 配置 → 拨开开关 → 保存配置 → 退出并重启 ZCode。")
-        return
+        # **不再是卡点。** 没保存过配置时 sync.py 会退回插件清单声明的默认值（全开）自动注入，
+        # 这正是「装完即用」的实现方式；旧版把「没表态」当成「不要做」，才导致装完什么都没发生。
+        print("提示：配置里没有保存过任何开关 —— 同步脚本会按**插件清单声明的默认值（全开）**注入。")
+        print("      这不是故障。想关掉个别功能：高级信息 → 配置 → 拨成关 → 保存配置 → 退出并重启。")
     if not hook_ok:
         print("★ 卡点：钩子文件缺失或结构不对 —— 重新安装插件（升级到最新版）。")
         return
     if not fired:
-        print("★ 卡点：开关已保存，但**钩子从未运行过**。")
+        print("★ 卡点：插件已启用，但**钩子从未运行过**。")
         st = (log_info or {}).get("startups") or []
         if st and st[-1].get("hooks") in (0, None):
             print("  日志已经给出直接原因：**最近一次启动注册的钩子数是 0**。")
@@ -657,14 +658,14 @@ def verdict(py_ok: bool, zcode_ok: bool, has_plugin: bool, enabled: bool,
             print("    ③ 启动后**开一个新会话**（SessionStart 在新会话第一轮才触发）；")
             print("    ④ 再跑一次本自检，第 7 节应出现心跳。")
         else:
-            print("  依次确认：① 保存配置后是否**完全退出**（托盘右键退出）并重启过 ZCode；")
+            print("  依次确认：① 是否**完全退出**（托盘右键退出）并重启过 ZCode；")
             print("            ② 重启后是否**开了一个新会话**（SessionStart 在新会话第一轮才触发）；")
             print("            ③ 命令行 `python --version` 是否可用（macOS/Linux 试 `python3 --version`）；")
             print("            ④ 已安装副本是不是最新版（「检查更新」）。")
         print("  → 兜底：不依赖钩子，直接用命令行打补丁（**完全退出 ZCode 后**执行）：")
         print(f'       python "{PATCHER}" --all')
         return
-    print("链路完整：插件已启用、开关已保存、钩子跑过。")
+    print("链路完整：插件已启用、钩子跑过。")
     print("若功能仍不可见，注意**重打包级补丁需要两次启动**：")
     print("  第一次启动 → 钩子登记待办 → 完全退出 ZCode（看护进程改写 app.asar）→ 第二次启动才生效。")
     print("第 8 节里显示「未打」的重打包项，退出 ZCode 后再看一次即可确认。")

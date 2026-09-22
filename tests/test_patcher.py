@@ -85,6 +85,30 @@ def quiet(fn, *a, **kw):
         return fn(*a, **kw)
 
 
+@contextlib.contextmanager
+def patcher_stubbed(sync, states=None):
+    """把 sync 里三处会真正碰客户端的地方换成记录桩，并返回调用记录列表。
+
+    **单元测试绝不能真的跑 zcode_patcher.py** —— 那会按当前开关改写本机的 app.asar，
+    跑一次测试就顺手把用户的客户端改了。所以：
+      check_state   → 查表返回（默认全 "on"，即「客户端已一致」，最安全的基线）
+      run_patcher   → 只记录，不执行
+      start_watchdog→ 只记录，不起进程
+    调用记录形如 ("run", ("--usage-chart",), False) / ("watchdog", {"tps_footer": True})。
+    """
+    table = states or {}
+    calls = []
+    orig = (sync.check_state, sync.run_patcher, sync.start_watchdog)
+    sync.check_state = lambda args: table.get(tuple(args), "on")
+    sync.run_patcher = lambda args, revert: (
+        calls.append(("run", tuple(args), revert)), True)[1]
+    sync.start_watchdog = lambda wanted: calls.append(("watchdog", dict(wanted)))
+    try:
+        yield calls
+    finally:
+        sync.check_state, sync.run_patcher, sync.start_watchdog = orig
+
+
 def make_cjs(anchor: str, prefix: str = "/*pre*/", suffix: str = "/*post*/",
              newline: str = "\n") -> bytes:
     """用真实锚点拼一个假的 zcode.cjs（含换行，用于验证字节级改写）。"""
@@ -965,15 +989,17 @@ class TestSyncHeartbeat(unittest.TestCase):
     def setUp(self):
         import sync
         self.sync = sync
-        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG)
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER)
         self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-hb-", ignore_cleanup_errors=True)
         d = Path(self._tmp.name)
         sync.CONFIG = d / "config.json"       # 故意不存在
         sync.STAMP = d / "_sync.last"
         sync.LOG = d / "_sync.log"
+        sync.MARKER = d / "_autoinject.done"  # 别把标记写进真实安装目录
 
     def tearDown(self):
-        self.sync.CONFIG, self.sync.STAMP, self.sync.LOG = self._orig
+        (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
+         self.sync.MARKER) = self._orig
         self._tmp.cleanup()
 
     def test_beat_writes_timestamp_and_message(self):
@@ -983,18 +1009,25 @@ class TestSyncHeartbeat(unittest.TestCase):
         self.assertRegex(text, r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 
     def test_main_beats_when_config_is_missing(self):
-        """没有配置时 main() 提前返回——这条路径必须留下心跳，否则用户无从判断
-        到底是「钩子没跑」还是「钩子跑了但没保存过开关」。"""
-        quiet(self.sync.main)
+        """从未点过「保存配置」时，心跳必须写明这次是按**插件清单默认值**自动注入的。
+
+        这正是「安装成功但不生效」的根因：ZCode 只在用户点过保存之后才写
+        `plugins.options`，旧逻辑把「没表态」当成「不要做」，于是装完重启什么都没发生，
+        而用户在界面上看不出任何原因。现在退回清单默认值，装完即自动注入。
+        """
+        with patcher_stubbed(self.sync) as calls:
+            quiet(self.sync.main)
         text = self.sync.STAMP.read_text(encoding="utf-8")
-        self.assertIn("未做任何操作", text)
+        self.assertTrue(text.strip(), "心跳文件不能为空")
         self.assertIn("从未保存过开关", text)
+        self.assertEqual(calls, [], "开关都已是目标状态时不应产生任何写入")
 
     def test_main_beats_when_nothing_to_do(self):
         """配置存在但所有开关都已一致时，也要留下心跳并写明「无需改动」。"""
         self.sync.CONFIG.write_text(json.dumps(
             {"plugins": {"options": {"zcode-tokenspeed@m": {}}}}), encoding="utf-8")
-        quiet(self.sync.main)
+        with patcher_stubbed(self.sync):
+            quiet(self.sync.main)
         text = self.sync.STAMP.read_text(encoding="utf-8")
         self.assertTrue(text.strip(), "心跳文件不能为空")
 
@@ -1011,16 +1044,18 @@ class TestSyncModes(unittest.TestCase):
     def setUp(self):
         import sync
         self.sync = sync
-        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, list(sys.argv))
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER, list(sys.argv))
         self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-mode-", ignore_cleanup_errors=True)
         d = Path(self._tmp.name)
         sync.CONFIG = d / "config.json"       # 故意不存在
         sync.STAMP = d / "_sync.last"
         sync.LOG = d / "_sync.log"
+        sync.MARKER = d / "_autoinject.done"  # 别把标记写进真实安装目录
 
     def tearDown(self):
-        self.sync.CONFIG, self.sync.STAMP, self.sync.LOG = self._orig[:3]
-        sys.argv[:] = self._orig[3]
+        (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
+         self.sync.MARKER) = self._orig[:4]
+        sys.argv[:] = self._orig[4]
         self._tmp.cleanup()
 
     def _run(self, *args):
@@ -1032,7 +1067,8 @@ class TestSyncModes(unittest.TestCase):
         orig = self.sync.spawn_detached
         self.sync.spawn_detached = lambda extra: (spawned.append(extra), True)[1]
         try:
-            self._run("--detach")
+            with patcher_stubbed(self.sync):
+                self._run("--detach")
         finally:
             self.sync.spawn_detached = orig
         self.assertEqual(spawned, [["--worker", "--from-hook"]])
@@ -1043,23 +1079,262 @@ class TestSyncModes(unittest.TestCase):
         orig = self.sync.spawn_detached
         self.sync.spawn_detached = lambda extra: False
         try:
-            self._run("--detach")
+            with patcher_stubbed(self.sync):
+                self._run("--detach")
         finally:
             self.sync.spawn_detached = orig
-        self.assertIn("未做任何操作", self.sync.STAMP.read_text(encoding="utf-8"))
+        text = self.sync.STAMP.read_text(encoding="utf-8")
+        self.assertTrue(text.strip(), "兜底路径也必须留下心跳")
+        self.assertIn("从未保存过开关", text)
 
     def test_worker_records_the_full_chain(self):
         """心跳要能证明「钩子 → 后台」这条链，否则看不出是钩子拉起来的。"""
-        self._run("--worker", "--from-hook")
+        with patcher_stubbed(self.sync):
+            self._run("--worker", "--from-hook")
         self.assertIn("[钩子→后台]", self.sync.STAMP.read_text(encoding="utf-8"))
 
     def test_hook_mode_never_writes_to_stdout(self):
         """钩子的 stdout 会被按严格 JSON schema 校验：输出非 JSON 会被判为「运行失败」。
         脚本副作用虽已生效，但日志里会留下假故障，所以后台路径必须一声不吭。"""
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            self.sync.run_sync(echo=False)
+        with patcher_stubbed(self.sync):
+            with contextlib.redirect_stdout(buf):
+                self.sync.run_sync(echo=False)
         self.assertEqual(buf.getvalue(), "")
+
+
+class TestAutoInject(unittest.TestCase):
+    """零配置自动注入 —— 「从插件市场装完就能用」这条要求就靠它落地。
+
+    ZCode 的插件清单里**没有安装时钩子**（`plugin-json-spec.md` 只允许声明
+    `skills` / `commands` / `hooks` / `mcpServers`），所以最早能自动触发的时机是
+    「下一次会话启动」的 `SessionStart`。在这条硬约束下，让「装完即生效」成立只能靠
+    一件事：**没保存过开关时按插件清单里声明的默认值注入**。
+    下面把这条链路的每一环都钉住，避免哪天有人把默认值改回 false 又变回「装了没生效」。
+    """
+
+    def setUp(self):
+        import sync
+        self.sync = sync
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-auto-", ignore_cleanup_errors=True)
+        self._d = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _resolve(self, opts, source, defaults):
+        """在受控输入下跑 resolve_wanted()。"""
+        orig = (self.sync.read_options, self.sync.declared_defaults)
+        self.sync.read_options = lambda: (opts, source)
+        self.sync.declared_defaults = lambda: defaults
+        try:
+            return self.sync.resolve_wanted()
+        finally:
+            self.sync.read_options, self.sync.declared_defaults = orig
+
+    def _switch_keys(self):
+        return {key for key, _args, _repack in self.sync.PATCHES}
+
+    # ---------------------------------------------------------------- 清单契约
+
+    def test_manifest_declares_every_switch_on_by_default(self):
+        """**这是「装完即用」的根契约**：清单里每个开关的 default 都必须是 true。
+
+        插件市场安装后，ZCode 的配置里根本没有 `plugins.options` 这一项（用户没点过
+        「保存配置」）。若默认值是 false，自动注入就变成「按默认值什么都不做」，
+        用户看到的还是「安装成功但没生效」——正是这条要求要消灭的情形。
+        """
+        manifest = json.loads((_HERE.parent / ".zcode-plugin" / "plugin.json")
+                              .read_text(encoding="utf-8"))
+        uc = manifest.get("userConfig") or {}
+        self.assertEqual(set(uc), self._switch_keys(),
+                         "plugin.json 的 userConfig 必须与 sync.PATCHES 一一对应")
+        off = sorted(k for k, v in uc.items() if v.get("default") is not True)
+        self.assertEqual(off, [], f"这些开关的 default 不是 true，装完不会自动生效: {off}")
+
+    def test_declared_defaults_reads_the_real_manifest(self):
+        got = self.sync.declared_defaults()
+        self.assertEqual(set(got), self._switch_keys())
+        self.assertTrue(all(got.values()), f"默认值应全为 true，实际 {got}")
+
+    def test_declared_defaults_skips_non_boolean_entries(self):
+        """userConfig 里可能混着非开关项（字符串/枚举），不能当成开关塞进结果。"""
+        root = self._d / "plug"
+        (root / ".zcode-plugin").mkdir(parents=True)
+        (root / ".zcode-plugin" / "plugin.json").write_text(json.dumps({
+            "name": "x",
+            "userConfig": {"a": {"default": True}, "b": {"default": "high"},
+                           "c": {"default": False}, "d": {"no_default": 1}},
+        }), encoding="utf-8")
+        scripts = root / "skills" / "zcode-tokenspeed" / "scripts"
+        scripts.mkdir(parents=True)
+        orig = self.sync.HERE
+        self.sync.HERE = scripts
+        try:
+            self.assertEqual(self.sync.declared_defaults(), {"a": True, "c": False})
+        finally:
+            self.sync.HERE = orig
+
+    def test_declared_defaults_without_manifest_is_empty(self):
+        scripts = self._d / "lonely" / "skills" / "zcode-tokenspeed" / "scripts"
+        scripts.mkdir(parents=True)
+        orig = self.sync.HERE
+        self.sync.HERE = scripts
+        try:
+            self.assertEqual(self.sync.declared_defaults(), {})
+        finally:
+            self.sync.HERE = orig
+
+    # ------------------------------------------------------------ 合并优先级
+
+    def test_never_saved_config_falls_back_to_defaults(self):
+        """从未保存过开关 → 全部按默认值注入。这就是零配置自动注入本身。"""
+        wanted, origin = self._resolve({}, None, {"a": True, "b": True})
+        self.assertEqual(wanted, {"a": True, "b": True})
+        self.assertIn("从未保存过开关", origin)
+
+    def test_saved_value_wins_over_default(self):
+        """保存过的值优先——用户明确关掉的开关不能被默认值悄悄打开。"""
+        wanted, _ = self._resolve({"a": False}, "config", {"a": True, "b": True})
+        self.assertEqual(wanted, {"a": False, "b": True})
+
+    def test_missing_key_is_filled_from_defaults(self):
+        """插件升级新增开关时，老配置里没有这个键 → 补默认值，不会漏注入。"""
+        wanted, _ = self._resolve({"a": False}, "config", {"a": True, "new": True})
+        self.assertEqual(wanted, {"a": False, "new": True})
+
+    def test_explicit_false_survives_as_revert(self):
+        """显式关掉必须是 false（触发还原），不能被当成「没表态」。"""
+        wanted, origin = self._resolve({"a": False}, "config", {"a": True})
+        self.assertIs(wanted["a"], False)
+        self.assertEqual(origin, "config")
+
+    def test_nothing_available_means_no_operation(self):
+        """配置读不到 + 清单也读不到 → 只能什么都不做（并如实说明）。"""
+        self.assertEqual(self._resolve({}, None, {}), ({}, ""))
+        self.assertEqual(self._resolve({"a": "high"}, "config", {}), ({}, ""))
+
+    # ------------------------------------------------------ 第三态 na（不适用）
+
+    def test_check_state_reports_not_applicable(self):
+        """≤3.11 专用的内核补丁在 3.14+ 会打印「不适用」，必须单独成一态。
+
+        否则它会被当成「未打」→ 去执行 → 脚本空转一圈什么都没做，
+        最后却被报成「已生效」——默认值全开之后这个误报每次装完都会出现。
+        """
+        cases = {"本补丁不适用（ZCode 3.14+ 已原生支持）": "na",
+                 "[!] 未打": "off", "已打": "on", "看不懂的输出": "unknown"}
+        for text, want in cases.items():
+            with self.subTest(text=text):
+                orig = self.sync.subprocess.run
+                self.sync.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(
+                    [], 0, stdout=text, stderr="")
+                try:
+                    self.assertEqual(self.sync.check_state([]), want)
+                finally:
+                    self.sync.subprocess.run = orig
+
+    def test_run_sync_skips_switches_that_do_not_apply(self):
+        """na 的开关既不执行也不报错，只在结论里注明「本版本不适用」。"""
+        orig = (self.sync.read_options, self.sync.declared_defaults)
+        self.sync.read_options = lambda: ({"core_patch": True}, "config")
+        self.sync.declared_defaults = lambda: {}
+        try:
+            with patcher_stubbed(self.sync, {(): "na"}) as calls:
+                summary = self.sync.run_sync(echo=False)
+        finally:
+            self.sync.read_options, self.sync.declared_defaults = orig
+        self.assertEqual(calls, [], "不适用的补丁不应被执行")
+        self.assertIn("本版本不适用", summary)
+        self.assertNotIn("已生效", summary)
+
+    def test_na_is_skipped_even_when_user_asked_for_it(self):
+        """用户显式打开也不该去跑不适用的补丁——照样只标注、不执行。"""
+        orig = (self.sync.read_options, self.sync.declared_defaults)
+        self.sync.read_options = lambda: ({"core_patch": False}, "config")
+        self.sync.declared_defaults = lambda: {}
+        try:
+            with patcher_stubbed(self.sync, {(): "na"}) as calls:
+                summary = self.sync.run_sync(echo=False)
+        finally:
+            self.sync.read_options, self.sync.declared_defaults = orig
+        self.assertEqual(calls, [])
+        self.assertIn("本版本不适用", summary)
+
+    # ------------------------------------------------------ 会话提示（可见性）
+
+    def test_notice_is_a_schema_valid_hook_output(self):
+        """提示必须是一个「以 { 开头的合法 JSON 对象」，且只带 additionalContext。
+
+        内核只在 stdout 以 `{` 开头时才解析（`wQs()` 里 `startsWith("{")`），
+        并按 zod schema 严格校验；`hookSpecificOutput` 还要核对 `hookEventName`
+        与本次事件一致，写错会把这次钩子标成失败。所以只用被**无条件**消费的
+        顶层 `additionalContext`（`Lio()` 里 `t.additionalContext && …push(…)`）。
+        """
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.sync.emit_notice()
+        raw = buf.getvalue()
+        self.assertTrue(raw.startswith("{"), f"必须以 {{ 开头才会被解析: {raw[:40]!r}")
+        data = json.loads(raw)
+        self.assertEqual(list(data), ["additionalContext"], "只允许这一个字段")
+        self.assertIsInstance(data["additionalContext"], str)
+        self.assertIn(self.sync.NOTICE_HEAD, data["additionalContext"])
+
+    def test_notice_names_both_injection_paths(self):
+        """提示要讲清「哪些立即生效、哪些要完全退出 ZCode 才写」——否则用户会以为没生效。"""
+        notice = self.sync.build_notice()
+        self.assertIn("重启 ZCode", notice)
+        self.assertIn("完全退出 ZCode", notice)
+        self.assertIn("doctor.py", notice)
+
+    def test_first_auto_inject_fires_exactly_once(self):
+        """提示只出一次，之后每次开会话都弹就成了噪声。"""
+        orig = self.sync.MARKER
+        self.sync.MARKER = self._d / "_autoinject.done"
+        try:
+            self.assertTrue(self.sync.first_auto_inject())
+            self.assertFalse(self.sync.first_auto_inject())
+            self.assertTrue(self.sync.MARKER.exists())
+        finally:
+            self.sync.MARKER = orig
+
+    def test_first_auto_inject_survives_unwritable_marker(self):
+        """标记写不进去（只读安装目录）时不能抛异常，也不能每次都当首次而反复提示。"""
+        orig = self.sync.MARKER
+        self.sync.MARKER = self._d / "nope" / "x" / "_autoinject.done"
+        try:
+            self.assertFalse(self.sync.first_auto_inject())
+        finally:
+            self.sync.MARKER = orig
+
+    def test_detach_emits_notice_only_on_the_first_session(self):
+        """整条钩子链路：第一次开会话出提示，第二次安静。"""
+        import sync
+        orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER, sync.spawn_detached,
+                list(sys.argv))
+        d = self._d / "hook"
+        d.mkdir()
+        sync.CONFIG = d / "config.json"
+        sync.STAMP = d / "_sync.last"
+        sync.LOG = d / "_sync.log"
+        sync.MARKER = d / "_autoinject.done"
+        sync.spawn_detached = lambda extra: True
+        try:
+            outs = []
+            with patcher_stubbed(sync):
+                for _ in range(2):
+                    sys.argv[:] = ["sync.py", "--detach"]
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        sync.main()
+                    outs.append(buf.getvalue())
+            self.assertTrue(outs[0].startswith("{"), "首次必须给出提示")
+            self.assertEqual(outs[1], "", "第二次不该再提示")
+        finally:
+            (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER,
+             sync.spawn_detached) = orig[:5]
+            sys.argv[:] = orig[5]
 
 
 class TestDoctorDiscovery(unittest.TestCase):
@@ -1399,6 +1674,163 @@ class TestZcodeLogScan(unittest.TestCase):
             doctor.verdict(True, True, True, True, True, True, False, None)
         out = buf.getvalue()
         self.assertIn("依次确认", out)
+
+
+class TestDoctorAutoInjectWording(unittest.TestCase):
+    """自检报告里关于「配置没保存过」的措辞必须与零配置自动注入一致。
+
+    旧措辞把它写成**卡点**并让人去点「保存配置」—— 那是旧行为（没保存过就什么都不做）。
+    现在没保存过 = 按插件清单默认值自动注入，恰恰是「装完即用」的正常状态；
+    如果自检还把它报成故障，用户就会被指去做一件根本不必要的事，
+    而且会误以为「我没保存配置，所以插件没生效」——正是要消灭的那种误导。
+    """
+
+    def _options(self, saved):
+        import doctor
+        orig = doctor._saved_options
+        doctor._saved_options = lambda: saved
+        return orig
+
+    def test_check_options_does_not_call_missing_config_a_fault(self):
+        import doctor
+        orig = self._options({})
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                ok = doctor.check_options()
+        finally:
+            doctor._saved_options = orig
+        out = buf.getvalue()
+        self.assertFalse(ok, "返回值仍表示「没有保存过的开关」")
+        self.assertIn("这不是故障", out)
+        self.assertIn("默认值", out)
+        self.assertNotIn(doctor.BAD, out, "不该再用 ✗ 把它标成故障")
+
+    def test_verdict_does_not_block_when_nothing_was_ever_saved(self):
+        """saved=False + 钩子跑过 → 链路是完整的，不能停在这里。"""
+        import doctor
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            doctor.verdict(True, True, True, True, False, True, True, None)
+        out = buf.getvalue()
+        self.assertNotIn("★ 卡点", out)
+        self.assertIn("链路完整", out)
+        self.assertIn("默认值", out)
+
+    def test_verdict_still_blocks_when_hook_never_ran(self):
+        """去掉 saved 这道闸之后，「钩子没跑」仍然必须被报成卡点。"""
+        import doctor
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            doctor.verdict(True, True, True, True, False, True, False, None)
+        out = buf.getvalue()
+        self.assertIn("★ 卡点", out)
+        self.assertIn("从未运行过", out)
+
+
+class TestPluginHookSpec(unittest.TestCase):
+    """`hooks/hooks.json` 必须落在内核那两个 zod schema 的字段表里。
+
+    内核 `a7s()`（反编译自 `resources/glm/zcode.cjs`）对每个 matcher 跑
+    `qz.safeParse(u)`；**解析失败就 `continue` 直接丢掉这个钩子**，只留一条
+    `plugin_hook_invalid` / severity=error 的诊断。后果是「钩子静默消失、`hookCount` 变 0」，
+    而日志里那条 error 很容易被忽略。所以这里把 schema 钉死，避免以后手滑加字段。
+
+    内核原文（已核对）：
+        _rs = G.object({type:G.literal("process"), command:G.string().min(1),
+                        enabled:G.boolean().optional(), args:G.array(G.string()).optional(),
+                        timeoutMs:G.number().int().positive().optional(),
+                        statusMessage:G.string().optional()})
+        yrs = G.object({type:G.literal("command"), command:G.string().min(1),
+                        enabled:G.boolean().optional(), async:G.boolean().optional(),
+                        shell:G.union([G.literal(!0), G.string().min(1)]).optional(),
+                        timeout:G.number().positive().optional(),          // 秒
+                        timeoutMs:G.number().int().positive().optional(),  // 毫秒
+                        statusMessage:G.string().optional()})
+        qz  = G.object({matcher:G.string().optional(), hooks:G.array(vrs).min(1)})
+    """
+
+    EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
+              "PostToolUse", "PostToolUseFailure", "Stop"}
+    COMMAND_FIELDS = {"type", "command", "enabled", "async", "shell",
+                      "timeout", "timeoutMs", "statusMessage"}
+    PROCESS_FIELDS = {"type", "command", "enabled", "args", "timeoutMs", "statusMessage"}
+
+    def _spec(self) -> dict:
+        return json.loads((_HERE.parent / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+
+    def _hooks(self):
+        for event, matchers in self._spec()["hooks"].items():
+            for i, m in enumerate(matchers):
+                for j, h in enumerate(m["hooks"]):
+                    yield f"{event}[{i}].hooks[{j}]", h
+
+    def test_declares_at_least_one_supported_event(self):
+        events = set(self._spec()["hooks"])
+        self.assertTrue(events, "hooks.json 至少要声明一个事件")
+        self.assertLessEqual(events, self.EVENTS,
+                             "内核只认这 7 个事件，多写会被报 plugin_hook_unsupported_event 并跳过")
+
+    def test_matcher_objects_only_use_matcher_and_hooks(self):
+        for event, matchers in self._spec()["hooks"].items():
+            self.assertIsInstance(matchers, list, event)
+            self.assertTrue(matchers, f"{event} 的 matcher 列表不能为空")
+            for m in matchers:
+                self.assertLessEqual(set(m), {"matcher", "hooks"}, f"{event}: {sorted(m)}")
+                self.assertIsInstance(m["hooks"], list)
+                self.assertTrue(m["hooks"], "hooks 数组至少要有一条（内核 min(1)）")
+
+    def test_session_start_omits_matcher_to_match_every_session(self):
+        """刻意**不写** matcher —— 省略即匹配全部。
+
+        内核的 matcher 取值是 `startup` / `resume` / `clear` / `compact`。若写成
+        `startup|clear|compact`，会静默漏掉 `resume`（用户从历史会话恢复时钩子不跑）；
+        写死 `startup` 则「恢复会话」这条路径永远不触发。省略最稳。
+        """
+        for m in self._spec()["hooks"]["SessionStart"]:
+            self.assertNotIn("matcher", m)
+
+    def test_every_hook_uses_declared_fields_only(self):
+        seen = []
+        for path, h in self._hooks():
+            seen.append(path)
+            self.assertIn(h.get("type"), ("command", "process"), path)
+            allowed = self.PROCESS_FIELDS if h["type"] == "process" else self.COMMAND_FIELDS
+            extra = set(h) - allowed
+            self.assertEqual(extra, set(), f"{path} 用了内核 schema 未声明的字段: {sorted(extra)}")
+            self.assertIsInstance(h.get("command"), str, path)
+            self.assertTrue(h["command"].strip(), f"{path} 的 command 不能为空（内核 min(1)）")
+        self.assertTrue(seen, "一个钩子都没有？")
+
+    def test_timeout_units_follow_the_schema(self):
+        """`timeout` 是**秒**、`timeoutMs` 是**毫秒** —— 混用会让超时变得荒谬。
+
+        内核里两者都存在（`c7s()` 把它们分别搬进 details），解析顺序是
+        `timeoutMs` → `timeout×1000` → 配置的 `timeoutMs` → 默认 60000ms。
+        所以写成 `"timeout": 120000` 会被当成 12 万秒（33 小时），
+        而 `"timeoutMs": 120` 只有 0.12 秒，钩子还没拉起后台进程就被砍掉。
+        """
+        for path, h in self._hooks():
+            if "timeout" in h:
+                self.assertIsInstance(h["timeout"], (int, float), path)
+                self.assertGreater(h["timeout"], 0, path)
+                self.assertLess(h["timeout"], 600, f"{path}: timeout 的单位是秒，{h['timeout']} 太大了")
+            if "timeoutMs" in h:
+                self.assertIsInstance(h["timeoutMs"], int, path)
+                self.assertGreater(h["timeoutMs"], 0, path)
+                self.assertGreater(h["timeoutMs"], 1000, f"{path}: timeoutMs 的单位是毫秒")
+
+    def test_hook_command_has_a_python3_fallback(self):
+        """Windows 上是 `python`，macOS / Linux 上常常只有 `python3`。
+
+        钩子命令是插件唯一的自动入口，写死 `python` 会让一半用户在 macOS/Linux 上
+        静默什么都不发生（钩子被调用但命令不存在），所以必须带 `|| python3 ...` 兜底。
+        """
+        for path, h in self._hooks():
+            self.assertIn("python", h["command"], path)
+            self.assertIn("python3", h["command"], f"{path} 缺少 python3 兜底")
+            self.assertIn("CLAUDE_PLUGIN_ROOT", h["command"],
+                          f"{path} 应该用 ${{CLAUDE_PLUGIN_ROOT}} 定位脚本，不要写死路径")
 
 
 if __name__ == "__main__":

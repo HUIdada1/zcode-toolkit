@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """zcode-tokenspeed 插件开关同步（由 SessionStart hook 调用）
 
-把客户端补丁同步到插件配置里的期望状态：
-  字节级补丁（用量图表 / 弹窗加宽）—— 立即应用或还原，无需重启 ZCode
-  重打包级补丁（TPS 状态栏 / 拉取按钮）—— 交给退出后看护，ZCode 退出时自动应用
+把客户端补丁同步到期望状态：
+  字节级补丁（用量图表 / 弹窗加宽 / 档位配置）—— 立即写入，下次启动可见
+  重打包级补丁（状态栏 / 滑条 / 增强 / 拉取）—— 交给退出后看护，ZCode 退出时写入
 
-只在用户显式保存过某个开关（配置里存在该键）时才动它；从未保存过则完全不操作，
-避免插件在用户没表态时改动客户端文件。
+**零配置自动注入**：ZCode 只在用户点过「保存配置」后才把开关写进 config.json。
+如果没保存过就什么都不做，用户看到的就是「装好了但没生效」。所以这里改为：
+**已保存的开关优先，没保存过的键退回插件清单 `plugin.json` 里声明的默认值**。
+装完 → 重启 ZCode → 开个新会话，钩子就会按默认值自动注入，**不需要打开配置页**。
 
 三种调用形态：
   sync.py --detach   钩子用：登记心跳后**立刻后台化**并返回，绝不阻塞会话启动
@@ -27,6 +29,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -41,6 +44,9 @@ LOG = HERE / "_sync.log"
 # 为什么需要它：没拨过开关时 sync 什么也不做、日志也是空的，「钩子没触发」与
 # 「触发了但无事可做」在日志里长得一模一样——排查安装问题时这是最关键的一条信息。
 STAMP = HERE / "_sync.last"
+# 首次自动注入的标记：用来保证「装好了，正在自动注入」这条会话提示只出现一次，
+# 不然后面每次开会话都弹一遍，很快就变成噪声。
+MARKER = HERE / "_autoinject.done"
 
 # 配置键 -> (zcode_patcher.py 参数, 是否重打包级)
 PATCHES = [
@@ -133,6 +139,34 @@ def _coerce(raw):
     return out
 
 
+def declared_defaults() -> dict:
+    """读插件清单 `plugin.json` 里 `userConfig.*.default` 声明的默认值。
+
+    **这是「零配置自动注入」的关键一环**：ZCode 只在用户点过「保存配置」之后才把
+    `plugins.options` 写进 `config.json`；从没保存过就什么都没有。此时若按旧逻辑
+    「没表态就不动」，用户看到的就是「装好了但没生效」——而这恰恰是最常见的抱怨。
+    退回清单默认值之后，装完重启一次即自动注入，不必打开配置页、不必跑任何命令。
+
+    向上找几层是为了兼容三种插件落点（市场根即插件根 / cache 的版本目录 / plugins 子目录）。
+    """
+    for base in list(HERE.parents)[2:6]:
+        for rel in (".zcode-plugin/plugin.json", ".claude-plugin/plugin.json"):
+            p = base / rel
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            uc = data.get("userConfig")
+            if not isinstance(uc, dict):
+                continue
+            out = {k: v["default"] for k, v in uc.items()
+                   if isinstance(v, dict) and isinstance(v.get("default"), bool)}
+            if out:
+                return out
+    log("没找到插件清单，取不到默认值")
+    return {}
+
+
 def read_options():
     """读本插件的开关值。返回 (options, source)；source 为 None 表示没找到配置。"""
     # 宿主若把插件配置注入 hook 环境，优先用环境变量
@@ -158,10 +192,19 @@ def read_options():
 
 
 def check_state(args) -> str:
-    """跑 --check 判断当前注入状态：on / off / unknown。"""
+    """跑 --check 判断当前注入状态：on / off / na（本版本不适用）/ unknown。
+
+    `na` 是必需的第三态：例如 ≤3.11 专用的内核补丁在 3.14+ 上会明确打印
+    「本补丁不适用」。旧逻辑只看「未打」→ 把它当成 off → 去执行 → 脚本空转一圈，
+    最后却报成「已生效」。默认值全开之后，这个误报每次装完都会出现，必须区分开。
+    """
     r = subprocess.run([sys.executable, str(PATCHER), *args, "--check"],
-                       capture_output=True, text=True, cwd=str(HERE), timeout=120)
+                       capture_output=True, encoding="utf-8", errors="replace",
+                       cwd=str(HERE), timeout=120,
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8"))
     out = (r.stdout or "") + (r.stderr or "")
+    if "不适用" in out:
+        return "na"
     if "未打" in out:
         return "off"
     if "已打" in out:
@@ -171,7 +214,9 @@ def check_state(args) -> str:
 
 def run_patcher(args, revert: bool) -> bool:
     cmd = [sys.executable, str(PATCHER), *args] + (["--revert"] if revert else [])
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(HERE), timeout=300)
+    r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace",
+                       cwd=str(HERE), timeout=300,
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8"))
     out = (r.stdout or "") + (r.stderr or "")
     # zcode_patcher.py 拒绝改写时仍返回 0（只在输出里打 [!] 说明原因），必须看输出判定
     refused = any(mark in out for mark in ("锚点匹配异常", "拒绝", "[!]"))
@@ -191,27 +236,50 @@ def start_watchdog(wanted: dict) -> None:
     log(f"已启动退出后看护: {' '.join(args)}")
 
 
+def resolve_wanted() -> tuple[dict, str]:
+    """算出这次要同步成什么样，返回 (期望状态, 来源说明)。
+
+    规则：**已保存的开关优先，没保存过的键退回清单里声明的默认值。**
+      * 从没保存过配置 → 全部用默认值（这就是「零配置自动注入」）
+      * 保存过一部分   → 保存的照做，没提到的用默认值（插件升级新增开关时不会漏）
+      * 显式关掉的开关 → 保存值是 false，优先于默认值，会被正常还原
+    """
+    opts, source = read_options()
+    defaults = declared_defaults()
+    if source is None:
+        if not defaults:
+            return {}, ""
+        log("配置里没有本插件（从未保存过开关）→ 改用插件清单声明的默认值")
+        return dict(defaults), "插件默认值（从未保存过开关）"
+    explicit = {k: v for k, v in opts.items() if isinstance(v, bool)}
+    if not explicit:
+        if not defaults:
+            return {}, ""
+        log(f"配置来自 {source}，但没有可用布尔值 → 退回插件默认值")
+        return dict(defaults), "插件默认值（配置里没有可用开关）"
+    merged = {**defaults, **explicit}          # 保存值优先，缺的键补默认值
+    return merged, source
+
+
 def run_sync(echo: bool = False) -> str:
     """真正干活的同步逻辑。返回一句话结论（同时写进日志与心跳）。
 
     echo=False 时**不往 stdout 写任何东西**：钩子的 stdout 会被按 JSON schema 严格校验，
     输出非 JSON 会被判为「钩子运行失败」（虽然脚本副作用已经生效，但日志里会留下假故障）。
     """
-    opts, source = read_options()
-    if source is None:
-        return "配置里没有本插件（从未保存过开关）→ 按设计未做任何操作"
+    wanted, origin = resolve_wanted()
+    if not wanted:
+        return "既没有已保存的开关，也读不到插件清单默认值 → 未做任何操作"
 
-    explicit = {k: v for k, v in opts.items() if isinstance(v, bool)}
-    if not explicit:
-        log(f"配置来自 {source}，但没有可用的布尔开关值: {opts}")
-        return f"配置来自 {source}，但没有可用的布尔开关值 → 未做任何操作"
-
-    changed, deferred, failed = [], {}, []
+    changed, deferred, failed, skipped = [], {}, [], []
     for key, args, repack in PATCHES:
-        want = explicit.get(key)
-        if want is None:
-            continue  # 该开关用户没表态，不碰
+        if key not in wanted:
+            continue
+        want = wanted[key]
         state = check_state(args)
+        if state == "na":
+            skipped.append(key)          # 本版本不需要这个补丁（如 3.14+ 的内核补丁）
+            continue
         if state == "unknown":
             failed.append(f"{key}(状态未知)")
             continue
@@ -233,18 +301,69 @@ def run_sync(echo: bool = False) -> str:
 
     parts = []
     if changed:
-        parts.append("已生效: " + "、".join(changed))
+        parts.append("已写入: " + "、".join(changed))
     if deferred:
-        parts.append("ZCode 退出时自动应用: " + "、".join(
+        parts.append("ZCode 退出时写入（下次启动可见）: " + "、".join(
             f"{k}→{'开' if v else '关'}" for k, v in deferred.items()))
+    if skipped:
+        parts.append("本版本不适用: " + "、".join(skipped))
     if failed:
         parts.append("未处理: " + "、".join(failed))
     summary = (" | ".join(parts) if parts
-               else f"所有已保存的开关都已与客户端一致（配置来自 {source}），无需改动")
-    log(f"同步结果 —— {summary}")
+               else f"所有开关都已与客户端一致（来源：{origin}），无需改动")
+    log(f"同步结果（来源：{origin}）—— {summary}")
     if echo:
         print(f"[zcode-tokenspeed] {summary}")
     return summary
+
+
+NOTICE_HEAD = "ZCode Patcher 已自动接管本地补丁注入（无需手动配置）"
+
+
+def build_notice() -> str:
+    """首次自动注入时注入会话的说明。"""
+    doctor = HERE / "doctor.py"
+    return (
+        f"{NOTICE_HEAD}。本次会话启动时已在后台开始同步：\n"
+        "· 用量页去截断、模型弹窗加宽、思考档位配置 —— 直接写入，重启 ZCode 后可见；\n"
+        "· TPS 状态栏、思考强度滑条、增强提示词、模型拉取按钮 —— 需要改写 app.asar，"
+        "会在你**完全退出 ZCode**（托盘图标右键 → 退出）时写入，下次启动即可见。\n"
+        "这一条只在首次自动注入时出现。想核对结果可以运行（只读，可选）：\n"
+        f'    python "{doctor}"'
+    )
+
+
+def emit_notice() -> None:
+    """往会话里注入一条说明，让「自动注入到底做没做」看得见。
+
+    输出必须符合 ZCode 的 HookJSONOutput schema —— 这份 schema 是从内核
+    `resources/glm/zcode.cjs` 里反查出来的（`uyr` / `grs` 两个 zod 定义）：
+
+        { additionalContext?, additional_context?, continue?, decision?,
+          hookSpecificOutput?, reason?, stopReason?, suppressOutput?, systemMessage? }
+
+    这里只用顶层 `additionalContext`：它在内核里被**无条件**推入 `additionalContexts`
+    （`Lio()` 里 `t.additionalContext && n.additionalContexts.push(...)`），
+    不像 `hookSpecificOutput` 那样还要校验 `hookEventName` 与本次事件一致 ——
+    写错事件名会被判为「钩子返回了错误的事件名」并把这次运行标成失败，没必要冒这个险。
+    输出以 `{` 开头才会被解析（`wQs()` 里 `if(!n||!n.startsWith("{"))return;`），
+    所以任何异常都直接吞掉、什么都不打印，绝不影响注入本身。
+    """
+    try:
+        print(json.dumps({"additionalContext": build_notice()}, ensure_ascii=False))
+    except Exception as exc:
+        log(f"提示输出失败: {exc!r}")
+
+
+def first_auto_inject() -> bool:
+    """是不是这个插件安装后的第一次自动注入（决定要不要出那条提示）。"""
+    try:
+        if MARKER.exists():
+            return False
+        MARKER.write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 
 def main() -> None:
@@ -259,6 +378,8 @@ def main() -> None:
     if "--detach" in argv:
         # 钩子模式：先留下心跳（哪怕后台起不来也证明钩子跑过），再立刻返回
         beat("已启动（后台同步）")
+        if first_auto_inject():
+            emit_notice()          # 只在首次自动注入时往会话里说明一句
         if not spawn_detached(["--worker", "--from-hook"]):
             beat(run_sync(echo=False))  # 兜底：后台起不来就前台做完
         return
