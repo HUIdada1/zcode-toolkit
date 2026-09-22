@@ -154,6 +154,8 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 
 - 关键文件相对安装根目录固定：`resources/glm/zcode.cjs`（内核）、`resources/app.asar`（桌面端资源包）
 - Python ≥ 3.10，用系统可用的 `python3`/`python` 即可，脚本仅用标准库
+- 改动脚本后先跑回归测试：`python -m unittest discover -s tests -v`（纯标准库；含 asar 重打包往返、
+  备份指纹、档位配置迁移、注入代码语法等 39 个用例；本机装了 ZCode 时还会只读校验真实 asar 的 integrity）
 - Program Files / /Applications 类目录可能需要管理员/sudo 权限
 - 执行 AI 可按上述规则自行定位安装（如 `ls /Applications`、查运行中进程的 exe 路径）
 

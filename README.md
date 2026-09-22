@@ -27,6 +27,18 @@ ZCode 桌面客户端的本地增强补丁插件:七个补丁覆盖模型思考�
 **模型拉取按钮**(`--model-puller`)——3.14.x 的界面模型列表以 `<dataBaseDir>/.zcode/v2/provider_config.json` 为唯一事实源(`dataBaseDir` 从 `~/.zcode/v2/setting.json` 解析,数据目录迁移到 F 盘等场景也能正确定位),本补丁读写时自动合并/回写新 schema 的 `personalModelIds`/`modelOrder` 与模型规则,同时保持旧 `config.json` 元数据一致;界面删除模型后再次拉取可正常重加,不再出现「已添加却写不进列表」。
 
 每个补丁都支持 `--check`(只读查状态)与 `--revert`(精确还原),互不干扰、可单独装卸。
+另有通用开关:`--dry-run`(只报告改动不写盘)、`--verbose`(打印探测细节)、`--force`(跳过备份指纹校验,慎用);
+打补丁/还原前会预检 ZCode 进程,运行中直接拒绝(退出码 2)。
+
+**回归测试**(纯标准库 unittest,无需 pytest):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+覆盖 asar 头解析与重打包(offset 重排、unpacked 条目)、integrity 精确同步、内核补丁的字节级改写与
+备份指纹、3.14+ 档位配置迁移与冲突跳过、注入代码语法;装了 ZCode 时还会**只读校验真实 app.asar**
+的逐条目 integrity(约 2.7 万条)。CI 在 Python 3.10/3.12/3.13 上跑这套用例。
 
 ## 快速开始
 

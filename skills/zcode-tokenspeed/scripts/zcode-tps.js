@@ -85,7 +85,8 @@
     m.setAttribute("data-ztps-menu", "1");
     Object.assign(m.style, {
       position: "fixed", left: x + "px", top: y + "px", zIndex: "2147483000",
-      background: "var(--color-background, #1e1e1e)", color: "var(--color-foreground, #e8e8e8)",
+      background: "var(--color-background, var(--ztps-bg, #ffffff))",
+      color: "var(--color-foreground, var(--ztps-fg, #1b1f24))",
       border: "1px solid rgba(127,127,127,0.3)", borderRadius: "10px",
       padding: "4px", display: "flex", flexDirection: "column", gap: "2px",
       fontSize: "12px", lineHeight: "1.4", boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
@@ -122,6 +123,34 @@
       openPosMenu(e.clientX, e.clientY);
     }
   }, true);
+
+  // ---------- 主题兜底 ----------
+  // 颜色优先用应用自己的 CSS 变量（--color-foreground 等），一旦某个版本改了变量名，
+  // 就退到我们自己的变量上；而我们的变量按「应用主题类（.dark）→ 系统偏好」两级判定，
+  // 避免出现「浅色主题 + 深色兜底字色」这种看不清的组合。
+  const STYLE_ID = "ztps-style";
+  function ensureStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    try {
+      const st = document.createElement("style");
+      st.id = STYLE_ID;
+      st.textContent = [
+        "[data-ztps-bar]{--ztps-fg:#1b1f24;--ztps-dim:#5b6470;--ztps-accent:#b45309}",
+        ".dark [data-ztps-bar],html.dark [data-ztps-bar],body.dark [data-ztps-bar]",
+        "{--ztps-fg:#e8e8e8;--ztps-dim:#9a9a9a;--ztps-accent:#e0983a}",
+        "@media (prefers-color-scheme: dark){",
+        ":root:not(.light):not([data-theme='light']) [data-ztps-bar]",
+        "{--ztps-fg:#e8e8e8;--ztps-dim:#9a9a9a;--ztps-accent:#e0983a}}",
+        "[data-ztps-menu]{--ztps-bg:#ffffff;--ztps-fg:#1b1f24}",
+        ".dark [data-ztps-menu],html.dark [data-ztps-menu],body.dark [data-ztps-menu]",
+        "{--ztps-bg:#1e1e1e;--ztps-fg:#e8e8e8}",
+        "@media (prefers-color-scheme: dark){",
+        ":root:not(.light):not([data-theme='light']) [data-ztps-menu]",
+        "{--ztps-bg:#1e1e1e;--ztps-fg:#e8e8e8}}",
+      ].join("");
+      document.head.appendChild(st);
+    } catch (err) { /* 静默 */ }
+  }
 
   const turns = new Map();          // turnId(msg_xxx) -> 轮统计
   const firstChunkByScid = {};
@@ -235,6 +264,11 @@
   }
 
   const findByScid = (scid) => {
+    // 先走映射表（usage.delta 每条都要调，原来是无脑全表扫描）
+    if (scidTurn.has(scid)) {
+      const t = turns.get(scidTurn.get(scid));
+      if (t && t.sourceCommandId === scid) return t;
+    }
     for (const t of turns.values()) if (t.sourceCommandId === scid) return t;
     return null;
   };
@@ -501,6 +535,7 @@
       }
       const visible = new Set();
       document.querySelectorAll("section[data-turn-id]").forEach((el) => visible.add(el.getAttribute("data-turn-id")));
+      lastVisible = visible;
       // 会话累计:轮数 / 累计输入 / 累计缓存命中 / 累计输出(仅当前可见会话的轮次)
       const agg = { rounds: 0, input: 0, cache: 0, output: 0 };
       let latest = null;
@@ -585,10 +620,10 @@
         pill._zkey = key;
         pill.style.background = "rgba(127,127,127,0.08)";
         pill.style.padding = "0 10px";
-        pill.style.color = "var(--color-foreground-subtle, #7a7a7a)";
+        pill.style.color = "var(--color-foreground-subtle, var(--ztps-dim, #5b6470))";
         pill.innerHTML = "";
-        const ACCENT = "var(--color-warning, #e0983a)";
-        const VALUE = "var(--color-foreground, #e8e8e8)";
+        const ACCENT = "var(--color-warning, var(--ztps-accent, #b45309))";
+        const VALUE = "var(--color-foreground, var(--ztps-fg, #1b1f24))";
         const span = (txt, cls) => {
           const sp = document.createElement("span");
           sp.textContent = txt;
@@ -632,17 +667,42 @@
       // 渐进降级:溢出时按优先级丢段(本轮 out → 首 token → tok/s;会话累计段保留);
       // composer-below 与 composer 同宽空间充裕,窄窗口下才触发
       try {
-        for (const drop of [3, 1, 2]) {
-          if (pill.scrollWidth <= pill.clientWidth + 1) break;
-          const g = segs.find((x) => x.p === drop);
-          if (!g) continue;
-          g.nodes.forEach((n) => n.remove());
-        }
+        // 放进 rAF：读完 scrollWidth 会强制回流，别在同步渲染路径里做（避免读-写-读抖动）
+        requestAnimationFrame(() => {
+          try {
+            for (const drop of [3, 1, 2]) {
+              if (pill.scrollWidth <= pill.clientWidth + 1) break;
+              const g = segs.find((x) => x.p === drop);
+              if (!g) continue;
+              g.nodes.forEach((n) => n.remove());
+            }
+          } catch (err) { /* 静默 */ }
+        });
       } catch (err) { /* 静默 */ }
     } catch (err) { /* 静默 */ }
   }
 
   // ---------- 渲染 ②: 清理历史遗留的逐轮统计行（统计只在工具栏展示） ----------
+  // 轮次表回收：turns / rowTurn / respTurn / scidTurn / firstChunkByScid 原来只增不删，
+  // 长会话或长时间挂着会一直涨。规则：不在当前可见轮次里、且 30 分钟没有活动的记录删掉。
+  const PRUNE_MS = 30 * 60 * 1000;
+  let lastVisible = null;
+  function prune() {
+    const now = Date.now();
+    for (const [id, t] of turns) {
+      if (lastVisible && lastVisible.has(id)) continue;
+      const last = t.lastUsageAt || t.endedAt || t.startedAt || 0;
+      if (now - last <= PRUNE_MS) continue;
+      turns.delete(id);
+      if (t.sourceCommandId) scidTurn.delete(t.sourceCommandId);
+      for (const [rid, tid] of rowTurn) if (tid === id) rowTurn.delete(rid);
+      for (const [rid, tid] of respTurn) if (tid === id) respTurn.delete(rid);
+    }
+    for (const k of Object.keys(firstChunkByScid)) {
+      if (!scidTurn.has(k) && now - (firstChunkByScid[k] || 0) > PRUNE_MS) delete firstChunkByScid[k];
+    }
+  }
+
   function removeLegacyFooters() {
     try {
       document.querySelectorAll(`[${MARK}]:not([data-ztps-bar])`).forEach((el) => el.remove());
@@ -655,10 +715,17 @@
   }
 
   function start() {
-    setInterval(scan, 1000);   // 流式估算 1s 刷新节奏
+    ensureStyle();
+    // 流式估算 1s 刷新节奏；页面不可见（切到别的窗口）时直接跳过，省掉整轮 DOM 扫描
+    setInterval(() => {
+      if (document.hidden) return;
+      scan();
+      prune();
+    }, 1000);
     try {
       let lastSync = 0;
       const mo = new MutationObserver(() => {
+        if (document.hidden) return;
         // DOM 一变立即同步刷新，切换会话零残留；16ms 节流防回放风暴
         const now = performance.now();
         if (now - lastSync > 16) { lastSync = now; renderBar(); }

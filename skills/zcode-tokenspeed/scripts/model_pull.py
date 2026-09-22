@@ -36,9 +36,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-CONFIG_PATH = Path.home() / ".zcode" / "v2" / "config.json"
-
-
 def resolve_v2_root() -> Path:
     """解析 v2 配置根目录：~/.zcode/v2/setting.json 的 dataBaseDir 优先
     （与 ZCode 客户端 bootstrap 同逻辑），未设置时回退 home 目录。"""
@@ -55,6 +52,14 @@ def resolve_v2_root() -> Path:
 
 V2_ROOT = resolve_v2_root()
 CONFIG_PATH = V2_ROOT / "config.json"
+
+
+def set_v2_root(root: str | None) -> None:
+    """用 --v2-root 覆盖配置根目录（数据目录迁移 / 测试用）。"""
+    global V2_ROOT, CONFIG_PATH
+    if root:
+        V2_ROOT = Path(root)
+        CONFIG_PATH = V2_ROOT / "config.json"
 
 FALLBACK_EFFORTS = ["off", "low", "high", "max"]
 FALLBACK_LIMIT = {"context": 1000000, "output": 128000}
@@ -311,8 +316,10 @@ def sync_provider_config(cfg: dict) -> None:
             api["baseUrl"] = opts["baseURL"]
         if pdata.get("kind"):
             api["type"] = kind_to_api(pdata["kind"])
-        c["personalModelIds"] = list(ids)
-        c["modelOrder"] = list(ids)
+        # 保序：既有顺序保留，新模型追加到末尾（整体覆盖会把用户在界面里排好的顺序打乱）
+        old_order = [i for i in (c.get("modelOrder") or []) if i in ids]
+        c["personalModelIds"] = old_order + [i for i in ids if i not in old_order]
+        c["modelOrder"] = list(c["personalModelIds"])
         # 该供应商的模型规则：保留既有（界面手改的 contextWindow 等），缺失才补，
         # 已删除模型的规则随之移除；其它供应商与 account 级规则原样不动。
         # 注意：同一模型不能同时出现在 providerModelRules（智能规则）与
@@ -352,7 +359,10 @@ def main() -> None:
                     help="按服务器元数据刷新已有条目的 limit 与思考档位（其余键不动）")
     ap.add_argument("--no-reasoning", action="store_true", help="新模型不配思考档位")
     ap.add_argument("--test", nargs="+", metavar=("BASE_URL", "API_KEY"), help="只测试 URL/Key 连通与模型列表")
+    ap.add_argument("--v2-root", default=None,
+                    help="覆盖 v2 配置根目录（默认按 setting.json 的 dataBaseDir 解析）")
     args = ap.parse_args()
+    set_v2_root(args.v2_root)
 
     if args.test:
         url = args.test[0]

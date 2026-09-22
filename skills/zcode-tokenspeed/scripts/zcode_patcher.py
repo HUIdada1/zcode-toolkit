@@ -458,11 +458,15 @@ def _from_common_dirs(found: list[Path]) -> None:
     bases = [os.environ.get("ProgramFiles"),
              os.environ.get("ProgramFiles(x86)"),
              os.environ.get("ProgramW6432"),
-             os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
              "/Applications",
              os.path.expanduser("~/Applications"),
              "/opt",
              "/usr/share"]
+    # 只在确实有 LOCALAPPDATA 时加 %LOCALAPPDATA%\Programs：
+    # 否则 os.path.join("", "Programs") 会拼出相对路径，可能误命中当前工作目录下的同名文件夹
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        bases.insert(3, os.path.join(local_appdata, "Programs"))
     for base in bases:
         if not base or not Path(base).is_dir():
             continue
@@ -1149,7 +1153,9 @@ if(!np.options.apiKey&&op&&op.options&&op.options.apiKey)np.options.apiKey=op.op
 }catch(_){}
 // 备份只在首次创建时写：否则第二次保存会把"已改过的版本"当备份，失去回滚意义
 if(!n.existsSync(o+".puller-bak"))try{n.writeFileSync(o+".puller-bak",n.readFileSync(o,"utf-8"))}catch(a){}
-n.writeFileSync(o,JSON.stringify(t,null,2),"utf-8");
+let tmpCfg=o+".tmp";
+n.writeFileSync(tmpCfg,JSON.stringify(t,null,2),"utf-8");
+n.renameSync(tmpCfg,o);
 try{
 let pcPath=r.join(root,"provider_config.json");
 let pc={};
@@ -1183,8 +1189,10 @@ if(pdata.options&&pdata.options.apiKey)c.access.apiKey=pdata.options.apiKey;
 c.api=c.api||{};
 if(pdata.options&&pdata.options.baseURL)c.api.baseUrl=pdata.options.baseURL;
 if(pdata.kind)c.api.type=kt(pdata.kind);
-c.personalModelIds=ids.slice();
-c.modelOrder=ids.slice();
+// 保序：既有顺序保留、新模型追加末尾（整体覆盖会打乱用户在界面里排好的顺序）
+let oldOrder=Array.isArray(c.modelOrder)?c.modelOrder.filter(function(x){return ids.indexOf(x)>=0}):[];
+c.personalModelIds=oldOrder.concat(ids.filter(function(x){return oldOrder.indexOf(x)<0}));
+c.modelOrder=c.personalModelIds.slice();
 let oldRules={},keep=[];
 let manual=new Set();
 let manualArr=(pc.config&&pc.config.modelConfigRules&&pc.config.modelConfigRules.manualProviderModelRules)||[];
@@ -1205,7 +1213,9 @@ mrules.length=0;
 for(let m of keep)mrules.push(m)
 }
 if(!n.existsSync(pcPath+".puller-bak"))try{n.writeFileSync(pcPath+".puller-bak",n.readFileSync(pcPath,"utf-8"))}catch(a2){}
-n.writeFileSync(pcPath,JSON.stringify(pc,null,2),"utf-8");}catch(syncErr){return{success:!0,warn:"config.json written; provider_config.json sync failed: "+String(syncErr)}}
+let tmpPc=pcPath+".tmp";
+n.writeFileSync(tmpPc,JSON.stringify(pc,null,2),"utf-8");
+n.renameSync(tmpPc,pcPath);}catch(syncErr){return{success:!0,warn:"config.json written; provider_config.json sync failed: "+String(syncErr)}}
 return{success:!0}}
 catch(n){return{success:!1,error:String(n)}}});
 '''.replace("__H__", h)
@@ -1890,6 +1900,14 @@ def process_reasoning_config(v2_root: Path, check_only: bool, revert: bool, *,
     print(f"    配置根目录: {v2_root}")
 
     by_key = {(r.get("providerId"), r.get("modelId")): r for r in rules if isinstance(r, dict)}
+    # 预先存在的重复声明：同一模型同时出现在智能规则与手动规则里 → 内核 schema 校验失败、
+    # 整份供应商配置降级为空（界面表现为「模型全没了」）。这里只报告，不擅自删改。
+    dup = [f"{r.get('providerId')}/{r.get('modelId')}" for r in rules
+           if isinstance(r, dict) and f"{r.get('providerId')}/{r.get('modelId')}" in manual]
+    if dup:
+        print(f"    [!] 发现 {len(dup)} 个模型同时存在于 providerModelRules 与 "
+              f"manualProviderModelRules —— 内核会因此把整份供应商配置降级为空，"
+              f"建议在界面重新保存该供应商或手工清理：{', '.join(dup[:4])}")
     planned, unchanged, no_levels, conflicts, builtin_skipped = [], [], [], [], 0
 
     for pid, pdata in (cfg.get("provider") or {}).items():

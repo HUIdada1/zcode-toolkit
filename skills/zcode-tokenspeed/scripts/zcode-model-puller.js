@@ -888,6 +888,10 @@
 
   // 注入高级质感按钮
   function checkAndInject() {
+    // 便宜短路：按钮已注入且仍在 DOM 里就别再全量扫了（这个函数被观察器高频调用）
+    const injected = document.getElementById("zcode-auto-pull-models-btn");
+    if (injected && injected.isConnected) return;
+
     let addModelBtn = document.querySelector('[data-testid="Goe"]');
     if (!addModelBtn) {
       const btns = Array.from(document.querySelectorAll("button"));
@@ -997,7 +1001,16 @@
     addModelBtn.after(pullBtn);
   }
 
-  const observer = new MutationObserver(() => checkAndInject());
+  // 观察器盯的是整个 body：React 每次重渲染、流式输出都会触发。原先每次变更都全量扫一遍
+  // button，开销明显；这里 250ms 防抖，配合 checkAndInject 里的「已注入」短路，常态下几乎零成本。
+  let injectTimer = null;
+  const observer = new MutationObserver(() => {
+    if (injectTimer) return;
+    injectTimer = setTimeout(() => {
+      injectTimer = null;
+      checkAndInject();
+    }, 250);
+  });
   observer.observe(document.body, { childList: true, subtree: true });
   checkAndInject();
 })();

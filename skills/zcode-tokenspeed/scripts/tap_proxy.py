@@ -313,6 +313,9 @@ def main() -> None:
     _log(f"  记录 : {ARGS.capture}")
     _log(f"  → 把 ZCode 里（测试用）供应商的 Base URL 指到 http://{host}:{port}/v1 即可")
     _log(f"  → Ctrl-C 结束\n")
+    _log("  ⚠ 安全提醒：本代理会**看到你的 API Key**（原样转发 Authorization / x-api-key 头），")
+    _log("    捕获文件里含请求体与凭据 —— 不要提交到仓库、不要分享；")
+    _log("    测完请把供应商的 Base URL 改回原地址，避免长期走代理。\n")
 
     srv = ThreadingHTTPServer((host, int(port)), Handler)
     srv.daemon_threads = True
