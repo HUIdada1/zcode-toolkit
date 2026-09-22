@@ -1064,8 +1064,11 @@ def _puller_main_state(blob: bytes | None):
     m = PULLER_MAIN_STRIP.search(blob)
     if m is None or m.start() >= a.start():
         return True, False, None, alias
-    stripped = blob[:m.start()] + blob[a.start():]
-    if blob[m.start():a.start()] == _puller_main_injection(alias):
+    # 注入段整体以换行开头（read_h 模板首字符），比对/剥离都要把它算进去，
+    # 否则永远比不中 → 每次 --check 都误报「含旧版组件」、每次打补丁都白重写一遍。
+    seg_start = m.start() - 1 if m.start() > 0 and blob[m.start() - 1:m.start()] == b"\n" else m.start()
+    stripped = blob[:seg_start] + blob[a.start():]
+    if blob[seg_start:a.start()] == _puller_main_injection(alias):
         return True, True, stripped, alias
     return True, False, stripped, alias
 
@@ -1386,10 +1389,30 @@ def _cleanup_stale_tmp(folder: Path) -> None:
 
 
 def _refresh_chart_sidecar(asar: Path) -> None:
-    """asar 重打包后数据区整体位移，字节级补丁（chart/width）记录里的绝对 offset
-    与 asar_size 指纹都需重定位，否则还原时按指纹判过期直接作废。"""
+    """asar 重打包后数据区整体位移：字节级补丁（chart/width）记录里的绝对 offset 与
+    asar_size 指纹都要重定位；重打包级补丁（tps/slider/puller）的 sidecar 只记 asar_size，
+    也必须跟着更新——否则后续 `--check` 会把 sidecar 报成「无」，看着像记录丢了。"""
     for suffix in (".chart-patch.json", ".width-patch.json"):
         _relocate_sidecar(asar, suffix)
+    try:
+        cur_size = asar.stat().st_size
+    except OSError:
+        return
+    for suffix in (".tps-patch.json", ".slider-patch.json", ".puller-patch.json"):
+        side = asar.with_name(asar.name + suffix)
+        if not side.is_file():
+            continue
+        try:
+            rec = json.loads(side.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(rec, dict) and rec.get("asar_size") != cur_size:
+            rec["asar_size"] = cur_size
+            try:
+                side.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+                print(f"[*] 已同步 {side.name} 的指纹到重打包后的 asar")
+            except OSError:
+                pass
 
 
 def _relocate_sidecar(asar: Path, suffix: str) -> None:
