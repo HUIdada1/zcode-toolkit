@@ -80,18 +80,58 @@ python "<skill目录>/scripts/doctor.py" --json   # 结构化输出，便于贴�
 | 思考档位配置（3.14+） | `--reasoning-config` | 下次会话启动（配置侧，无需重启 ZCode） |
 | 用量页去截断 | `--usage-chart` | 下次会话启动（字节级，无需重启 ZCode） |
 | 模型弹窗加宽 | `--model-width` | 下次会话启动（同上） |
-| TPS 状态栏 | `--tps-footer` | ZCode 退出时自动应用，下次启动生效 |
-| 思考强度滑条 | `--thought-slider` | ZCode 退出时自动应用，下次启动生效 |
-| 增强提示词按钮 | `--enhance-prompt` | ZCode 退出时自动应用，下次启动生效 |
-| 设置页模型拉取按钮 | `--model-puller` | ZCode 退出时自动应用，下次启动生效 |
+| TPS 状态栏 | `--tps-footer` | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
+| 思考强度滑条 | `--thought-slider` | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
+| 增强提示词按钮 | `--enhance-prompt` | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
+| 设置页模型拉取按钮 | `--model-puller` | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
 | 思考档位内核补丁（旧版专用） | 无参数 | 仅 ≤3.11.2 需要；3.14.x 请保持关闭 |
 
 行为约定（`scripts/sync.py`，由 SessionStart hook 调用）：
 
 - **只同步显式保存过的开关**。没拨过的开关一律不碰——首次安装插件不会自动改动客户端文件。
-- 字节级补丁（图表 / 加宽）当场执行；重打包级补丁（TPS / 拉取按钮）写进退出后看护 `scripts/apply_after_exit.py`，等 ZCode 完全退出时自动应用（asar 运行时被锁，只能这么来）。
+  没保存过时脚本会**静默什么都不做**（只在 `_sync.last` / `_sync.log` 留一行说明），
+  这是设计如此，不是故障——排查时这是最容易误判的一条。
+- **钩子是「登记心跳 + 后台化」就返回**（`sync.py --detach` → 子进程 `--worker`）。
+  原因：hook 是**内联**执行的（`async` 字段当前无运行时效果），而同步要跑多次 `--check`
+  （每次约 2 秒），同步做完再返回会拖住会话启动，还可能撞上钩子超时被砍掉。
+- 字节级补丁（图表 / 加宽）当场执行；重打包级补丁（TPS / 滑条 / 增强 / 拉取）写进退出后看护
+  `scripts/apply_after_exit.py`，等 ZCode 完全退出时自动应用（asar 运行时被锁，只能这么来）。
 - 开关状态与客户端实际状态不一致是正常的：ZCode 的开关默认值（`default: false`）是静态的，不会反映历史补丁状态。**把开关拨成你想要的状态并保存**，同步后两者就一致了。
-- 同步日志在 `scripts/_sync.log`；没找到配置时会记录 `config.json` 里 `plugins` 的实际键名，便于定位宿主的存储位置。
+- 日志与心跳：`scripts/_sync.log`（同步日志）、`scripts/_sync.last`（每次被调用都刷新，
+  证明「钩子到底跑没跑」）。没找到配置时会记录 `config.json` 里 `plugins` 的实际键名。
+- 一键自检：`python scripts/doctor.py`（只读）——插件是否安装/启用、配置是否保存过、
+  钩子是否跑过、八项补丁状态，末尾直接给卡点结论。
+
+### 钩子机制要点（官方 `diagnosing-hooks` skill + 内核实测）
+
+排查钩子问题时按这些硬事实对照，别凭直觉猜：
+
+- **插件钩子无需额外开关**：只要**任意一个插件**提供了钩子，钩子运行器就自动启用。
+  而配置文件（`~/.zcode/cli/config.json` 的顶层 `hooks`）里的钩子**默认关闭**，
+  必须写 `hooks.enabled: true`；它的形状是 `{enabled, timeoutMs, maxOutputBytes, events:{<事件>:[...]}}`
+  （比插件 `hooks/hooks.json` 多一层 `events`）。
+- **没有信任门禁**：官方明确说明「所有插件钩子都是 runnable」，第三方与内置一视同仁；
+  早期「未信任前仅诊断」的说法已过时。
+- **事件名只有 7 个**：`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PermissionRequest` /
+  `PostToolUse` / `PostToolUseFailure` / `Stop`。`Notification` / `SubagentStop` / `PreCompact` **不支持**。
+- **matcher 是大小写敏感的正则**，测试值随事件不同：`SessionStart` 的值是
+  `startup` / `resume` / `clear` / `compact`（**省略 matcher = 匹配全部**）。
+  ⚠️ 本插件的钩子**故意不写 matcher**：只写 `startup|clear|compact` 会漏掉 `resume`，
+  而「重开 ZCode 恢复上次会话」走的正是 `resume`——那就会静默不触发。
+- **`SessionStart` 在新会话的第一轮触发**（日志里表现为 `turnNumber: 0` 的 `session_start_hooks` 阶段），
+  不是开机自启那一刻。所以「重启后必须真的开个会话」。
+- **超时单位**：`type:"command"` 的 `timeout` 是**秒**，`process` 的 `timeoutMs` 是**毫秒**；
+  解析顺序 `timeoutMs` → `timeout×1000` → 配置的 `timeoutMs` → 默认 60000ms。
+- **字段不能混用**：`process` 只认 `command`/`args`/`timeoutMs`；`command` 认 `command`/`shell`/`timeout`/`timeoutMs`。混了钩子会被丢弃。
+- **`async` 字段当前无运行时效果**，钩子一律内联执行。
+- **钩子的 stdout 会被按严格 JSON schema 解析**：输出非 JSON（或含多余键）会被判为
+  「运行失败」并丢弃输出。所以 `sync.py` 在后台路径上**一声不吭**（要反馈就写日志/心跳）。
+- **模板变量**：`${CLAUDE_PLUGIN_ROOT}` / `${ZCODE_PLUGIN_ROOT}`（仅插件钩子）、
+  `${CLAUDE_PROJECT_DIR}` / `${ZCODE_PROJECT_DIR}`、`${CLAUDE_SESSION_ID}`；
+  这些变量同时会注入为环境变量。**`userConfig` 的值不在其中**——所以 `sync.py` 必须自己读
+  `config.json` 的 `plugins.options`。
+- **执行记录在 ZCode 日志里**：`~/.zcode/cli/log/zcode-<日期>.jsonl`，
+  搜 `session_start_hooks` 看钩子阶段，或看钩子运行的 outcome / duration / 错误流摘要。
 
 > **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题，与插件清单无关——界面拿到的插件信息里 `userConfig` 为空时，配置区整个不渲染（`Y2t` 组件里 `userConfig` 为空直接 `return null`）。清单本身是正确的（Agent 侧 `M5s` 完整解析、`f5s` 赋 `userConfig: e.manifest.userConfig`、`jGo` 条件展开，链路已逐环节核对）。此时**直接写配置文件**，效果完全一样：
 >

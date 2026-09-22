@@ -187,6 +187,10 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py "/opt/ZCode"            
 
 > 为什么重打包级要两次启停：它要改写整个 `app.asar`，而 ZCode 运行时锁着这个文件。
 > 所以插件在会话启动时只**登记待办**，等 ZCode 完全退出后由一个看护进程写入，**下一次启动**才看得到。
+>
+> **`SessionStart` 钩子是在「新会话的第一轮」触发的**，不是开机自启那一刻。所以重启 ZCode 之后
+> 要真的**开一个会话 / 发一条消息**，钩子才会跑。同步本身是**后台执行**的（不阻塞会话启动），
+> 一两秒内完成；跑没跑过看 `scripts/_sync.last`。
 
 四条行为约定：
 
@@ -195,6 +199,8 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py "/opt/ZCode"            
 - 开关的默认值（`default: false`）是静态的，**不反映客户端的历史状态**。把开关拨成你想要的状态并保存即可。
 - 同步日志在插件目录的 `scripts/_sync.log`，**心跳文件是 `scripts/_sync.last`**——
   每次钩子被调用都会刷新它。没有这个文件 = 钩子根本没跑过；文件里写着「未保存过开关」= 钩子跑了但你还没表态。
+- 最权威的证据是 **ZCode 自己的日志** `~/.zcode/cli/log/zcode-<日期>.jsonl`：
+  在里面搜 `session_start_hooks` 能看到钩子阶段有没有执行（钩子的触发/超时/失败都记在这里）。
 - 不想折腾钩子、或想立刻看到效果，随时可以直接用命令行打补丁（[方式 C](#方式-c只用命令行不装插件)），
   效果与插件开关完全一致。
 
@@ -260,14 +266,19 @@ python skills/zcode-tokenspeed/scripts/doctor.py
 
 加上 `--json` 可以输出一段结构化报告，方便贴给他人排查。
 
-### 四个最常见的卡点
+### 五个最常见的卡点
 
 | 卡点 | 自检里的样子 | 怎么办 |
 |---|---|---|
 | **插件没启用** | 第 4 节 `enabledPlugins` 里没有本插件 | 「设置 → 插件 → 管理已安装」打开开关 |
 | **配置没保存过** | 第 5 节 `plugins.options` 里没有本插件 | 高级信息 → 配置 → 拨开关 → **保存配置**（或 [手动写配置](#3-手动写配置兜底方案)） |
-| **钩子没跑过** | 第 7 节没有 `_sync.last` / `_sync.log` | 保存配置后**完全退出**（托盘右键退出）并重启；确认 `python --version` 可用；「检查更新」升到最新版 |
+| **没开过新会话** | 第 7 节没有 `_sync.last` / `_sync.log` | `SessionStart` 钩子在**新会话第一轮**才触发：重启后要真的开一个会话 / 发一条消息 |
+| **钩子没跑过** | 同上 | 确认 `python --version` 可用；「检查更新」升到最新版；再到 `~/.zcode/cli/log/zcode-<日期>.jsonl` 里搜 `session_start_hooks` |
 | **只重启了一次** | 第 8 节里重打包项显示「未打」 | 再退出一次 ZCode（退出时才写入 `app.asar`），然后启动 |
+
+> 钩子到底跑没跑，有三层证据可以对照，从弱到强：
+> ① `scripts/_sync.last` 心跳文件 → ② `scripts/_sync.log` 同步日志 →
+> ③ ZCode 自己的日志 `~/.zcode/cli/log/zcode-<日期>.jsonl` 里的 `session_start_hooks` 阶段。
 
 ### 完全绕开插件（保底方案）
 
@@ -312,7 +323,8 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all          # 一次�
 | 现象 | 处理 |
 |---|---|
 | **插件装好了但什么都没发生** | 先跑 `python skills/zcode-tokenspeed/scripts/doctor.py`，它会指出卡在哪一环（见 [装了没生效？先跑自检](#装了没生效先跑自检)） |
-| 开关拨了但功能没出现 | ① 确认插件在「管理已安装」里是**启用**状态；② 确认点了 **保存配置**；③ 重打包级功能需要**退出两次**才可见 |
+| 开关拨了但功能没出现 | ① 确认插件在「管理已安装」里是**启用**状态；② 确认点了 **保存配置**；③ 重启后要**开个新会话**（`SessionStart` 在新会话第一轮才触发）；④ 重打包级功能需要**退出两次**才可见 |
+| 想知道钩子到底有没有执行 | 看 `scripts/_sync.last`（心跳）与 `scripts/_sync.log`；最权威的是 ZCode 日志 `~/.zcode/cli/log/zcode-<日期>.jsonl` 里搜 `session_start_hooks` |
 | 插件页提示「打开一个工作区以管理插件」 | 先打开任意项目 / 工作区，插件页才可用 |
 | 添加市场报校验失败 | 确认填的是 `c80361619/zcode-toolkit`（或本地克隆目录本身，目录里要有 `marketplace.json`） |
 | 插件详情里没有「配置」区 | 宿主渲染问题；直接写配置文件，见 [手动写配置](#3-手动写配置兜底方案) |

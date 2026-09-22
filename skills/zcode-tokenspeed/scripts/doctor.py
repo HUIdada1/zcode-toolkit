@@ -96,17 +96,80 @@ def _find_configs() -> list[Path]:
 
 
 def _installed_plugin_dirs() -> list[Path]:
-    """在 <数据目录>/cli/plugins/marketplaces/<市场>/<插件名> 下找已安装副本。"""
+    """找出本插件实际安装在哪。
+
+    **不能只按 `<市场>/<插件名>/` 去找**：`source: "./"` 的市场（插件与市场同仓库，
+    比如本仓库）其插件根就是**市场目录本身**，根本没有同名子目录；
+    而 `source: "./plugins/x"` 的市场又会多出一层。所以这里改成「按清单里的 name 认」——
+    把候选目录都扫一遍，谁的 plugin.json 里 name 匹配就是它。
+    """
     found: list[Path] = []
-    for root in _storage_roots():
-        base = root / "cli" / "plugins" / "marketplaces"
-        if not base.is_dir():
+    for cand in _candidate_roots():
+        if cand in found:
             continue
-        for market in sorted(base.iterdir()):
-            cand = market / PLUGIN_NAME
-            if (cand / ".zcode-plugin" / "plugin.json").is_file():
-                found.append(cand)
+        manifest = _read_manifest(cand)
+        if manifest and manifest.get("name") == PLUGIN_NAME:
+            found.append(cand)
     return found
+
+
+def _plugin_bases() -> list[Path]:
+    """`<数据目录>/cli/plugins` 候选。"""
+    out = []
+    for root in _storage_roots():
+        p = root / "cli" / "plugins"
+        if p.is_dir():
+            out.append(p)
+    return out
+
+
+def _candidate_roots() -> list[Path]:
+    """所有可能藏着插件清单的目录（市场缓存 + 市场子目录 + 配置里 plugins.dirs）。"""
+    out: list[Path] = []
+
+    def add_children(base: Path, depth: int) -> None:
+        if depth <= 0 or not base.is_dir():
+            return
+        try:
+            kids = sorted(p for p in base.iterdir() if p.is_dir() and not p.name.startswith("."))
+        except OSError:
+            return
+        for k in kids:
+            out.append(k)
+            add_children(k, depth - 1)
+
+    for base in _plugin_bases():
+        for sub in ("marketplaces", "cache"):
+            d = base / sub
+            if not d.is_dir():
+                continue
+            try:
+                markets = sorted(p for p in d.iterdir() if p.is_dir())
+            except OSError:
+                continue
+            for m in markets:
+                out.append(m)          # source: "./" → 市场根即插件根
+                add_children(m, 2)     # source: "./plugins/x" 等更深一层
+    # 配置里显式登记的插件目录
+    for cfg_path in _find_configs():
+        dirs = (((_read_json(cfg_path) or {}).get("plugins") or {}).get("dirs")) or []
+        if isinstance(dirs, list):
+            for d in dirs:
+                if isinstance(d, str) and d.strip():
+                    p = Path(os.path.expanduser(d.strip()))
+                    out.append(p)
+                    add_children(p, 1)
+    return out
+
+
+def _read_manifest(root: Path) -> dict | None:
+    """读插件清单（按内核的查找顺序）。"""
+    for rel in (".zcode-plugin/plugin.json", ".claude-plugin/plugin.json",
+                ".codex-plugin/plugin.json"):
+        m = _read_json(root / rel)
+        if isinstance(m, dict) and m.get("name"):
+            return m
+    return None
 
 
 def _prefix_entries(cfg, section: str) -> dict:
@@ -118,11 +181,8 @@ def _prefix_entries(cfg, section: str) -> dict:
 
 
 def _manifest_version(root: Path) -> str:
-    for rel in (".zcode-plugin/plugin.json", ".claude-plugin/plugin.json"):
-        m = _read_json(root / rel)
-        if isinstance(m, dict) and m.get("version"):
-            return str(m["version"])
-    return "?"
+    m = _read_manifest(root)
+    return str(m["version"]) if m and m.get("version") else "?"
 
 
 def _enabled_state() -> bool:
@@ -227,7 +287,15 @@ def check_plugin() -> tuple[bool, list[Path], bool]:
 
     enabled = False
     for cfg_path in cfgs:
-        en = _prefix_entries(_read_json(cfg_path), "enabledPlugins")
+        cfg = _read_json(cfg_path) or {}
+        plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
+        master = plugins.get("enabled")
+        if master is False:
+            print(f"{BAD}   plugins.enabled = false —— **插件子系统总开关被关掉了，一切都不生效**")
+            print("       → 把 ~/.zcode/cli/config.json 里 plugins.enabled 改为 true（或删掉该键）")
+        else:
+            print(f"{OK}   plugins.enabled 未关闭（缺省即开启）")
+        en = _prefix_entries(cfg, "enabledPlugins")
         print(f"{INFO} {cfg_path}")
         if not en:
             print(f"{BAD}   plugins.enabledPlugins 里没有 {PLUGIN_NAME}* —— 插件未登记启用状态")
@@ -320,12 +388,26 @@ def check_heartbeat(dirs: list[Path]) -> bool:
             print(f"{WARN} 没有日志文件 {logf}")
     if not fired:
         print(f"{BAD} 已安装副本里没有任何执行痕迹 —— 钩子**从未运行过**")
-        print("       常见原因：插件没启用 / 启用后没开过新会话 / python 不在 PATH /")
+        print("       常见原因：插件没启用 / 保存配置后没开过新会话 / python 不在 PATH /")
         print("                 装的是改动前的旧版本（旧版钩子没有心跳文件）")
+    logd = _zcode_log_dir()
+    if logd:
+        print(f"{INFO} ZCode 自己的日志（钩子触发/超时/失败都记在这里）：{logd}")
+        print("       SessionStart 钩子在**新会话的第一轮**触发；"
+              "在日志里搜 `session_start_hooks` 能看到它有没有跑")
     if STAMP.is_file():
         print(f"{INFO} 本目录（源码仓库）心跳："
               f"{STAMP.read_text(encoding='utf-8', errors='replace').strip()}")
     return fired
+
+
+def _zcode_log_dir() -> Path | None:
+    """ZCode 的 jsonl 日志目录（钩子执行记录在里面）。"""
+    for root in _storage_roots():
+        d = root / "cli" / "log"
+        if d.is_dir():
+            return d
+    return None
 
 
 def check_patches() -> None:
@@ -375,8 +457,9 @@ def verdict(py_ok: bool, zcode_ok: bool, has_plugin: bool, enabled: bool,
     if not fired:
         print("★ 卡点：开关已保存，但**钩子从未运行过**。")
         print("  依次确认：① 保存配置后是否**完全退出**（托盘右键退出）并重启过 ZCode；")
-        print("            ② 命令行 `python --version` 是否可用（macOS/Linux 试 `python3 --version`）；")
-        print("            ③ 已安装副本是不是最新版（「检查更新」）。")
+        print("            ② 重启后是否**开了一个新会话**（SessionStart 在新会话第一轮才触发）；")
+        print("            ③ 命令行 `python --version` 是否可用（macOS/Linux 试 `python3 --version`）；")
+        print("            ④ 已安装副本是不是最新版（「检查更新」）。")
         print("  → 兜底：不依赖钩子，直接用命令行打补丁：")
         print(f'       python "{PATCHER}" --all')
         return

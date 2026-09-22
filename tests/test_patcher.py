@@ -998,5 +998,122 @@ class TestSyncHeartbeat(unittest.TestCase):
         self.assertTrue(text.strip(), "心跳文件不能为空")
 
 
+class TestSyncModes(unittest.TestCase):
+    """钩子必须是「登记心跳 + 后台化」就立刻返回。
+
+    为什么：hook 是**内联**执行的（`async` 字段当前无运行时效果），而同步一次要跑多次
+    `--check`（每次约 2 秒）。同步做完再返回会把会话启动硬生生拖住，还可能撞上钩子的
+    超时上限被砍掉——表现就是「什么都没发生」。所以 --detach 必须只做两件事：写心跳、
+    拉起后台进程，然后立刻退出。
+    """
+
+    def setUp(self):
+        import sync
+        self.sync = sync
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, list(sys.argv))
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-mode-", ignore_cleanup_errors=True)
+        d = Path(self._tmp.name)
+        sync.CONFIG = d / "config.json"       # 故意不存在
+        sync.STAMP = d / "_sync.last"
+        sync.LOG = d / "_sync.log"
+
+    def tearDown(self):
+        self.sync.CONFIG, self.sync.STAMP, self.sync.LOG = self._orig[:3]
+        sys.argv[:] = self._orig[3]
+        self._tmp.cleanup()
+
+    def _run(self, *args):
+        sys.argv[:] = ["sync.py", *args]
+        quiet(self.sync.main)
+
+    def test_detach_spawns_worker_and_returns(self):
+        spawned = []
+        orig = self.sync.spawn_detached
+        self.sync.spawn_detached = lambda extra: (spawned.append(extra), True)[1]
+        try:
+            self._run("--detach")
+        finally:
+            self.sync.spawn_detached = orig
+        self.assertEqual(spawned, [["--worker", "--from-hook"]])
+        self.assertIn("[钩子]", self.sync.STAMP.read_text(encoding="utf-8"))
+
+    def test_detach_falls_back_to_foreground_when_spawn_fails(self):
+        """后台起不来（比如被安全软件拦）时必须自己把活干完，而不是静默失败。"""
+        orig = self.sync.spawn_detached
+        self.sync.spawn_detached = lambda extra: False
+        try:
+            self._run("--detach")
+        finally:
+            self.sync.spawn_detached = orig
+        self.assertIn("未做任何操作", self.sync.STAMP.read_text(encoding="utf-8"))
+
+    def test_worker_records_the_full_chain(self):
+        """心跳要能证明「钩子 → 后台」这条链，否则看不出是钩子拉起来的。"""
+        self._run("--worker", "--from-hook")
+        self.assertIn("[钩子→后台]", self.sync.STAMP.read_text(encoding="utf-8"))
+
+    def test_hook_mode_never_writes_to_stdout(self):
+        """钩子的 stdout 会被按严格 JSON schema 校验：输出非 JSON 会被判为「运行失败」。
+        脚本副作用虽已生效，但日志里会留下假故障，所以后台路径必须一声不吭。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.sync.run_sync(echo=False)
+        self.assertEqual(buf.getvalue(), "")
+
+
+class TestDoctorDiscovery(unittest.TestCase):
+    """doctor 必须能认出「插件根 = 市场根」这种安装（marketplace.json 里 `source: "./"`）。
+
+    最初的实现只找 `<市场>/<插件名>/` 子目录——本地 directory 来源的市场恰好长这样，
+    所以在本机"看起来是对的"；但 GitHub 来源的市场是把仓库整个 clone 下来，插件根就是
+    市场根，根本没有同名子目录。这会在用户机器上误报「插件没装成功」，把人带偏。
+    """
+
+    def _with_storage(self, storage: Path):
+        import doctor
+        orig = doctor._storage_roots
+        doctor._storage_roots = lambda: [storage]
+        try:
+            return doctor._installed_plugin_dirs()
+        finally:
+            doctor._storage_roots = orig
+
+    def _make_plugin(self, root: Path, version: str = "9.9.9") -> None:
+        (root / ".zcode-plugin").mkdir(parents=True, exist_ok=True)
+        (root / ".zcode-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "zcode-tokenspeed", "version": version}), encoding="utf-8")
+
+    def test_finds_plugin_whose_root_is_the_marketplace_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            root = storage / "cli" / "plugins" / "marketplaces" / "zcode-toolkit-abc123"
+            self._make_plugin(root)
+            self.assertEqual(self._with_storage(storage), [root])
+
+    def test_finds_plugin_in_a_subdirectory(self):
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            root = storage / "cli" / "plugins" / "marketplaces" / "some-market" / "plugins" / "x"
+            self._make_plugin(root)
+            self.assertEqual(self._with_storage(storage), [root])
+
+    def test_ignores_plugins_with_other_names(self):
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            other = storage / "cli" / "plugins" / "marketplaces" / "m" / "other-plugin"
+            (other / ".zcode-plugin").mkdir(parents=True)
+            (other / ".zcode-plugin" / "plugin.json").write_text(
+                json.dumps({"name": "other-plugin"}), encoding="utf-8")
+            self.assertEqual(self._with_storage(storage), [])
+
+    def test_manifest_version_reads_from_found_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            storage = Path(d)
+            root = storage / "cli" / "plugins" / "marketplaces" / "m"
+            self._make_plugin(root, "1.2.3")
+            import doctor
+            self.assertEqual(doctor._manifest_version(root), "1.2.3")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

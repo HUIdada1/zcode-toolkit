@@ -9,6 +9,15 @@
 只在用户显式保存过某个开关（配置里存在该键）时才动它；从未保存过则完全不操作，
 避免插件在用户没表态时改动客户端文件。
 
+三种调用形态：
+  sync.py --detach   钩子用：登记心跳后**立刻后台化**并返回，绝不阻塞会话启动
+  sync.py --worker   内部用：真正干活的子进程（stdout 已被丢弃）
+  sync.py            人工调试用：前台执行，输出直接打在终端上
+
+为什么要后台化：hook 是**内联**执行的（`async` 字段当前无运行时效果），
+同步一次要跑多次 `--check`（每次约 2 秒），会话启动会被硬生生拖住；
+而且钩子有超时上限，机器慢/杀软扫盘时可能直接被砍掉，表现为「什么都没发生」。
+
 诊断日志：scripts/_sync.log
 心跳文件：scripts/_sync.last（每次被调用都刷新，用来证明「钩子到底跑没跑」）
 安装自检：python doctor.py（一条命令给出整条链路的结论）
@@ -66,11 +75,36 @@ def beat(msg: str) -> None:
     """
     try:
         import time
-        how = "钩子" if len(sys.argv) == 1 else "手动"
-        STAMP.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  [{how}] {msg}\n",
+        STAMP.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  [{_invocation()}] {msg}\n",
                          encoding="utf-8")
     except Exception:
         pass
+
+
+def _invocation() -> str:
+    """这次是被谁调起来的（写进心跳，便于区分「钩子」与「人工」）。"""
+    argv = sys.argv[1:]
+    if "--detach" in argv:
+        return "钩子"
+    if "--worker" in argv:
+        return "钩子→后台" if "--from-hook" in argv else "后台"
+    return "手动"
+
+
+def spawn_detached(extra_args: list) -> bool:
+    """把本脚本以后台进程方式再起一份，立刻返回（不等待、不阻塞会话启动）。"""
+    cmd = [sys.executable, str(Path(__file__).resolve()), *extra_args]
+    kw = {"cwd": str(HERE), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kw["creationflags"] = DETACHED_PROCESS | CREATE_NO_WINDOW
+    else:
+        kw["start_new_session"] = True
+    try:
+        subprocess.Popen(cmd, **kw)
+        return True
+    except Exception as exc:
+        log(f"后台启动失败: {exc!r}")
+        return False
 
 
 def _search(node, path="", depth=0):
@@ -157,18 +191,20 @@ def start_watchdog(wanted: dict) -> None:
     log(f"已启动退出后看护: {' '.join(args)}")
 
 
-def main() -> None:
-    beat("已启动")
+def run_sync(echo: bool = False) -> str:
+    """真正干活的同步逻辑。返回一句话结论（同时写进日志与心跳）。
+
+    echo=False 时**不往 stdout 写任何东西**：钩子的 stdout 会被按 JSON schema 严格校验，
+    输出非 JSON 会被判为「钩子运行失败」（虽然脚本副作用已经生效，但日志里会留下假故障）。
+    """
     opts, source = read_options()
     if source is None:
-        beat("配置里没有本插件（从未保存过开关）→ 按设计未做任何操作")
-        return  # 用户从未保存过开关，保持现状
+        return "配置里没有本插件（从未保存过开关）→ 按设计未做任何操作"
 
     explicit = {k: v for k, v in opts.items() if isinstance(v, bool)}
     if not explicit:
         log(f"配置来自 {source}，但没有可用的布尔开关值: {opts}")
-        beat(f"配置来自 {source}，但没有可用的布尔开关值 → 未做任何操作")
-        return
+        return f"配置来自 {source}，但没有可用的布尔开关值 → 未做任何操作"
 
     changed, deferred, failed = [], {}, []
     for key, args, repack in PATCHES:
@@ -203,13 +239,33 @@ def main() -> None:
             f"{k}→{'开' if v else '关'}" for k, v in deferred.items()))
     if failed:
         parts.append("未处理: " + "、".join(failed))
-    if parts:
-        summary = " | ".join(parts)
-        log(f"同步结果 —— {summary}")
+    summary = (" | ".join(parts) if parts
+               else f"所有已保存的开关都已与客户端一致（配置来自 {source}），无需改动")
+    log(f"同步结果 —— {summary}")
+    if echo:
         print(f"[zcode-tokenspeed] {summary}")
-    else:
-        summary = f"所有已保存的开关都已与客户端一致（配置来自 {source}），无需改动"
-        log(f"同步结果 —— {summary}")
+    return summary
+
+
+def main() -> None:
+    """入口分流：钩子只负责「登记心跳 + 后台化」，干活交给 --worker 子进程。"""
+    argv = sys.argv[1:]
+
+    if "--worker" in argv:
+        beat("后台同步已启动")
+        beat(run_sync(echo=False))
+        return
+
+    if "--detach" in argv:
+        # 钩子模式：先留下心跳（哪怕后台起不来也证明钩子跑过），再立刻返回
+        beat("已启动（后台同步）")
+        if not spawn_detached(["--worker", "--from-hook"]):
+            beat(run_sync(echo=False))  # 兜底：后台起不来就前台做完
+        return
+
+    # 人工前台执行：把结论直接打在终端上
+    beat("手动执行")
+    summary = run_sync(echo=True)
     beat(summary)
 
 
