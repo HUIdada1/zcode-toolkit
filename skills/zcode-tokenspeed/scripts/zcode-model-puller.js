@@ -389,7 +389,7 @@
 
     const toast = document.createElement("div");
     toast.className = "zcode-custom-toast";
-    toast.innerHTML = message;
+    toast.textContent = message;   // 纯文本：消息含供应商名/错误详情，不能当 HTML 解析
     document.body.appendChild(toast);
 
     setTimeout(() => {
@@ -618,24 +618,7 @@
               <button class="zcode-pull-mini-btn" id="zcode-select-new">仅选新模型 (${newCount})</button>
             </div>
           </div>
-          <div class="zcode-pull-list" id="zcode-modal-list">
-            ${models
-              .map((id) => {
-                const info = stateMap.get(id);
-                return `
-              <div class="zcode-pull-item" data-id="${id}">
-                <input type="checkbox" ${info.selected ? "checked" : ""} data-id="${id}" />
-                <span class="zcode-pull-item-name">${id}</span>
-                ${
-                  info.exists
-                    ? `<span class="zcode-pull-badge zcode-pull-badge-exists">已添加</span>`
-                    : `<span class="zcode-pull-badge zcode-pull-badge-new">新模型</span>`
-                }
-              </div>
-            `;
-              })
-              .join("")}
-          </div>
+          <div class="zcode-pull-list" id="zcode-modal-list"></div>
         </div>
         <div class="zcode-pull-footer">
           <div class="zcode-pull-count-info" id="zcode-pull-count-info">
@@ -652,6 +635,30 @@
         </div>
       </div>
     `;
+
+    // 列表项一律用 DOM API 构建：模型名来自远端 /models 响应，拼 innerHTML 会形成注入面
+    // （名字里带 " 或 & 时还会破坏属性、导致勾选与搜索错位）。这里只走 textContent /
+    // setAttribute，保证远端数据永远被当作纯文本。
+    const listEl = overlay.querySelector("#zcode-modal-list");
+    for (const id of models) {
+      const info = stateMap.get(id);
+      const item = document.createElement("div");
+      item.className = "zcode-pull-item";
+      item.setAttribute("data-id", id);
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!info.selected;
+      cb.setAttribute("data-id", id);
+      const nameEl = document.createElement("span");
+      nameEl.className = "zcode-pull-item-name";
+      nameEl.textContent = id;
+      const badge = document.createElement("span");
+      badge.className = "zcode-pull-badge " +
+        (info.exists ? "zcode-pull-badge-exists" : "zcode-pull-badge-new");
+      badge.textContent = info.exists ? "已添加" : "新模型";
+      item.append(cb, nameEl, badge);
+      listEl.appendChild(item);
+    }
 
     function updateCountsOnly() {
       let selCount = 0;

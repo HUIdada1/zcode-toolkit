@@ -8,16 +8,20 @@ description: 逐项查看/切换 zcode-tokenspeed 的注入功能开关
 
 | 键 | 功能 | 生效时机 |
 |---|---|---|
+| `reasoning_config` | 思考档位配置（3.14+ 原生 optionSpecs） | 下次会话启动（配置侧，无需重启 ZCode） |
 | `usage_chart` | 用量页去截断 | 下次会话启动（字节级，无需重启 ZCode） |
 | `model_width` | 模型弹窗加宽 | 下次会话启动（字节级） |
 | `tps_footer` | TPS 状态栏 | ZCode 退出时自动应用，重启后生效 |
+| `thought_slider` | 思考强度滑条 | ZCode 退出时自动应用，重启后生效 |
 | `model_puller` | 设置页模型拉取按钮 | ZCode 退出时自动应用，重启后生效 |
-| `core_patch` | 思考档位内核补丁（仅 ≤3.11.2） | 下次会话启动 |
+| `core_patch` | 思考档位内核补丁（仅 ≤3.11.2，3.14+ 请保持关闭） | 下次会话启动 |
 
 **流程**：
 
 1. 读 `~/.zcode/cli/config.json`，取出上述键的当前值（缺失表示"用户未表态"，插件不会去动它）。
 2. 同时跑 `python "<skill目录>/scripts/zcode_patcher.py" <对应参数> --check` 拿到**客户端实际注入状态**，把"配置值 / 实际状态"两列一起用中文表格展示给用户。
+   注意 3.14+ 下 `core_patch` 对应的内核补丁会报「本补丁不适用」，这是预期；档位是否生效要看
+   `--reasoning-config --check`（它列出每个模型当前配了几档、来源是 config 还是已在界面手动配置）。
 3. 问用户要改哪个键、改成什么。用户明确指定后再改。
 4. 改配置：**整份读入 → 只增改目标键 → 写回**，保持 JSON 缩进与其余内容不变；`plugins.options` 或插件 id 那一层不存在时按需创建。**不要动 `enabledPlugins` 等其他字段。**
 5. 告诉用户生效时机（见上表）；字节级的下次会话启动自动生效，重打包级的会在 ZCode 退出时由看护应用。

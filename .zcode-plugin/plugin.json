@@ -1,13 +1,19 @@
 {
   "name": "zcode-tokenspeed",
-  "version": "0.3.1",
-  "description": "ZCode 桌面客户端本地补丁注入工具：思考档位透传、用量页去截断、模型弹窗加宽、TPS 状态栏、设置页模型拉取按钮。全部幂等、可检查、可精确还原，并支持在插件详情页逐项开关。",
+  "version": "0.3.2",
+  "description": "ZCode 桌面客户端本地补丁注入工具：思考档位配置（3.14+ 原生 optionSpecs）、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、设置页模型拉取按钮。全部幂等、可检查、可精确还原，并支持在插件详情页逐项开关。",
   "author": {
     "name": "c80361619"
   },
   "skills": "./skills",
   "commands": "./commands",
   "userConfig": {
+    "reasoning_config": {
+      "type": "boolean",
+      "title": "思考档位配置（3.14+）",
+      "description": "把各模型已配的档位写进 provider_config.json 的 optionSpecs.reasoningLevel，界面档位列表与请求体参数都由它下发。3.14 起用这个，不需要内核补丁；界面手动配置过的模型会自动跳过。配置侧补丁：拨动并保存后，下次会话启动即生效。",
+      "default": false
+    },
     "usage_chart": {
       "type": "boolean",
       "title": "用量页去截断",
@@ -23,13 +29,19 @@
     "tps_footer": {
       "type": "boolean",
       "title": "TPS 状态栏",
-      "description": "输入框工具栏统计胶囊（时间·首 token·tok/s·out）。重打包级补丁：拨动并保存后，插件会在 ZCode 退出时自动应用，下次启动生效。",
+      "description": "输入框下方统计条（本轮指标 + 会话累计，右键可切位置）。重打包级补丁：拨动并保存后，插件会在 ZCode 退出时自动应用，下次启动生效。",
       "default": false
     },
     "model_puller": {
       "type": "boolean",
       "title": "设置页模型拉取按钮",
       "description": "设置页「⚡️ 自动拉取模型」按钮，勾选即写入配置。重打包级补丁：拨动并保存后，插件会在 ZCode 退出时自动应用，下次启动生效。",
+      "default": false
+    },
+    "thought_slider": {
+      "type": "boolean",
+      "title": "思考强度滑条",
+      "description": "工具栏「思考 · 档名」入口，点击弹出吸附拖拽条，拖完即时生效。重打包级补丁：拨动并保存后，插件会在 ZCode 退出时自动应用，下次启动生效。",
       "default": false
     },
     "core_patch": {

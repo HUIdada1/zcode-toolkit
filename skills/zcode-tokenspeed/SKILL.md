@@ -1,6 +1,6 @@
 ---
 name: zcode-tokenspeed
-description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①自定义模型思考档位透传 ②用量页去截断（趋势图/饼图全量）③模型弹窗加宽 ④TPS 状态栏（输入框统计胶囊：时间·首 token·tok/s·out）⑤设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tokenspeed」时才加载；用户只是泛泛提到思考等级、用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
+description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①思考档位配置（3.14+ 原生 optionSpecs，无需内核补丁）②思考档位透传（≤3.11 内核补丁）③用量页去截断（趋势图/饼图全量）④模型弹窗加宽 ⑤TPS 状态栏（输入框统计条：本轮指标+会话累计）⑥思考强度吸附滑条 ⑦设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tokenspeed」时才加载；用户只是泛泛提到思考等级、用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
 ---
 
 # ZCode 客户端补丁工具
@@ -11,27 +11,48 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 
 补丁会随 ZCode 升级失效或过时，先确认目标版本，再决定打哪个：
 
-| 补丁 | 3.11.2 及更早 | 3.14.x（含当前 D:\ZCode 3.14.1） |
+| 补丁 | 3.11.2 及更早 | 3.14.x（实测 3.14.1 / 3.14.3） |
 |---|---|---|
-| ① 思考档位透传（内核补丁） | 需要，走 `providerOptionsByLevel` 兜底 | **已过时**：内核机制整体重写，锚点与结构提取都失效。改用**原生 `optionSpecs.reasoningLevel`**（模型条目配 `{values:[...], map:"<CEL>"}`，内核发请求前求值并打进请求体）——不需要内核补丁，也不需要 `--extract` |
+| ① 思考档位透传（内核补丁） | 需要，走 `providerOptionsByLevel` 兜底 | **已过时**：内核机制整体重写（`providerOptionsByLevel` 只剩 schema 定义，`variants/defaultVariant` 已从内核消失），锚点与结构提取都失效。脚本会提示「原生档位机制，本补丁不适用」 |
+| ①′ 档位配置 `--reasoning-config` | 不需要（用 ①） | **需要**：把档位写进 `provider_config.json` 的 `providerModelRules[].config.optionSpecs.reasoningLevel`（`values` = 界面档位、末位即默认；`map` = CEL，内核发请求前求值并合并进请求体）。无需内核补丁 |
 | ② 用量页去截断 | 需要 | 需要 |
-| ③ 模型弹窗加宽 | 两处锚点 | 需要，但只剩**扁平弹窗**一处（渠道子菜单锚点在 3.14.x 结构已变） |
+| ③ 模型弹窗加宽 | 两处锚点 | 需要，但只剩**扁平弹窗**一处（渠道子菜单上游已改为自适应宽度 `w-max min-w-48`，脚本识别后报「无需补丁」） |
 | ④ TPS 状态栏 | 需要 | 需要 |
 | ⑤ 模型拉取按钮 | 需要 | 需要，模板已按 `optionSpecs` 新格式写入 |
+| ⑥ 思考强度滑条 | 需要 | 需要 |
+| ⑦ 模型弹窗加宽 / 用量图 / 拉取按钮的重打包注入 | — | 升级会整体覆盖 app.asar，三个重打包级注入（④⑥⑤）需重跑 |
 
-- 3.14.x 下**不要**再跑思考等级内核补丁（`python zcode_patcher.py` 不带参数那条），它找不到锚点；档位配置改走 `optionSpecs`。
+- 3.14.x 下**不要**再跑思考等级内核补丁（`python zcode_patcher.py` 不带参数那条）：脚本会明确提示
+  「该内核使用 3.14+ 原生档位机制（optionSpecs），本补丁不适用」——这不是故障，是预期行为。
+  档位配置改跑 `python zcode_patcher.py --reasoning-config`（见下节）。
+- **3.14.x 档位配置的标准命令**（把 `config.json` 的档位迁移进 `provider_config.json`）：
+  ```bash
+  python zcode_patcher.py --reasoning-config --check   # 只读：哪些模型已配/缺档位/已在界面手动配置过
+  python zcode_patcher.py --reasoning-config --dry-run # 预演：只报告将改哪几条规则
+  python zcode_patcher.py --reasoning-config           # 写入（先完全退出 ZCode）
+  python zcode_patcher.py --reasoning-config --revert  # 还原（provider_config.json.reasoning-bak）
+  ```
+  已在界面「手动配置」过的模型（`manualProviderModelRules`）会自动跳过——内核 schema 禁止同一
+  模型同时出现在两个规则列表，重复声明会让整份供应商配置降级为空。
 - `model_pull.py` 与 `zcode-model-puller.js` 已适配新格式：拉取模型时直接写 `optionSpecs`，`--refresh` 会把旧 `reasoning` 条目迁移过来。
+- 通用开关（所有补丁适用）：`--dry-run` 只报告改动不写盘 · `--verbose` 打印安装探测细节 ·
+  `--force` 跳过备份指纹校验（慎用）。
+- **打补丁/还原前会预检 ZCode 进程**：运行中直接拒绝（退出码 2）。只读 `--check` 与 `--dry-run` 不受限。
+- 备份带**版本指纹**（`*.bak.meta.json`）：客户端升级后旧备份自动归档（改名 `.stale-<时间>`），
+  还原时若当前文件与备份不是同一版本会**拒绝执行**，避免把旧内核/asar 盖回新客户端。
 - 确认版本：看客户端「关于」，或安装根目录（如 `D:\ZCode`）的版本信息。
 
 ### 插件开关（配置区）
 
-插件在 ZCode 的「设置 → 插件管理 → 已安装 → 点开插件」详情页里声明了 5 个开关。拨动开关并点「保存配置」后，插件会在**下次会话启动时**自动把客户端同步到该状态，不需要手动跑命令：
+插件在 ZCode 的「设置 → 插件管理 → 已安装 → 点开插件」详情页里声明了 7 个开关。拨动开关并点「保存配置」后，插件会在**下次会话启动时**自动把客户端同步到该状态，不需要手动跑命令：
 
 | 开关 | 控制的功能 | 生效时机 |
 |---|---|---|
+| 思考档位配置（3.14+） | `--reasoning-config` | 下次会话启动（配置侧，无需重启 ZCode） |
 | 用量页去截断 | `--usage-chart` | 下次会话启动（字节级，无需重启 ZCode） |
 | 模型弹窗加宽 | `--model-width` | 下次会话启动（同上） |
 | TPS 状态栏 | `--tps-footer` | ZCode 退出时自动应用，下次启动生效 |
+| 思考强度滑条 | `--thought-slider` | ZCode 退出时自动应用，下次启动生效 |
 | 设置页模型拉取按钮 | `--model-puller` | ZCode 退出时自动应用，下次启动生效 |
 | 思考档位内核补丁（旧版专用） | 无参数 | 仅 ≤3.11.2 需要；3.14.x 请保持关闭 |
 
@@ -67,11 +88,12 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 
 > 本机另有一条独立路径：计划任务 `ZCodePatchApply` 指向本地原仓库的 `scripts/_apply_after_exit.py`（硬编码 `D:/ZCode`，退出后注入 TPS + 拉取按钮并重启 ZCode）。它与插件机制互不干扰；要取消：`schtasks /Delete /TN ZCodePatchApply /F`。
 
-五类补丁，均幂等、可检查、可还原、ZCode 升级后需重打：
+七个补丁，均幂等、可检查、可还原、ZCode 升级后需重打：
 
 | 能力 | 说法 | 命令 | 改哪里 |
 |---|---|---|---|
-| 思考等级透传 | 给自定义模型配思考等级 | `python zcode_patcher.py [--check/--revert/--extract]` | 内核 zcode.cjs（原地改写，.bak 备份） |
+| **档位配置（3.14+）** | 给自定义模型配思考等级 | `python zcode_patcher.py --reasoning-config [--check/--revert]` | `provider_config.json` 的 `providerModelRules.optionSpecs`（配置侧原生，**不打内核**） |
+| 思考等级透传（≤3.11） | 给自定义模型配思考等级 | `python zcode_patcher.py [--check/--revert/--extract]` | 内核 zcode.cjs（原地改写，.bak 备份） |
 | 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
 | 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：本轮指标 + 会话累计（第 N 轮/输入/命中+平均命中率/累出） | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 思考强度滑条 | 工具栏「思考 · 档名」入口，点击弹出吸附拖拽条（动效）；原生下拉隐藏，拖完即时生效 | `python zcode_patcher.py --thought-slider [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
@@ -79,33 +101,47 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
 两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --model-width --tps-footer --thought-slider --model-puller`。
-另有命令行版拉模型（不动 asar，直接同步 config.json）：`python scripts/model_pull.py --all [--dry-run]`。
+另有命令行版拉模型（不动 asar，直接同步 config.json + provider_config.json）：`python scripts/model_pull.py --all [--dry-run]`。
+
+**通用开关**：`--dry-run`（只报告改动不写盘）· `--verbose`（打印探测细节）· `--force`（跳过备份指纹校验，慎用）。
 
 ## 标准执行流程（AI 代执行与人工自助通用）
 
 调用本 skill 时按以下序列执行，**AI 代执行时必须走完全部步骤，不得跳过核实与展示**：
 
-1. **定位安装**：脚本自动探测（运行中进程 → 注册表 → 常见目录，跨 Windows/macOS/Linux，见「跨平台约定」）；探测不到就把安装根目录作为位置参数传入。
+1. **定位安装**：脚本自动探测（运行中进程 → 注册表 → 常见目录，跨 Windows/macOS/Linux，见「跨平台约定」）；探测不到就把安装根目录作为位置参数传入（加 `--verbose` 看每一步探测结果）。
 2. **只读核实**（能否生效的判断，全部只读，可放心先跑）：
-   - `python zcode_patcher.py --check`：思考等级补丁状态；ZCode 版本不在「已知符号表」时跑 `--extract`——能提取出锚点即可生效，提取失败说明内核结构变了，按「新版本锚点提取」人工分析后再动。
+   - `python zcode_patcher.py --reasoning-config --check`：**3.14.x 先看这个**——哪些模型已配档位、哪些缺档位、哪些已在界面手动配置过（冲突会跳过）。
+   - `python zcode_patcher.py --check`：内核补丁状态；输出「原生档位机制（optionSpecs），本补丁不适用」即 3.14+，直接走上面的 `--reasoning-config`；≤3.11 且版本不在「已知符号表」时跑 `--extract`——能提取出锚点即可生效，提取失败说明内核结构变了，按「新版本锚点提取」人工分析后再动。
    - `python zcode_patcher.py --usage-chart --check`：两个截断表达式是否命中。
-   - `python zcode_patcher.py --model-width --check`：扁平弹窗锚点是否命中（3.14.x 渠道子菜单锚点已不存在，报「未找到锚点，跳过」属预期）。
+   - `python zcode_patcher.py --model-width --check`：扁平弹窗锚点是否命中（3.14.x 渠道子菜单锚点已不存在，报「上游已改为自适应宽度，无需补丁」属预期）。
    - `python zcode_patcher.py --tps-footer --check`：index.html 是否找到、注入状态。
+   - `python zcode_patcher.py --thought-slider --check`：滑条脚本注入状态。
    - `python zcode_patcher.py --model-puller --check`：四组件（renderer / index 挂载 / preload 桥 / main handler）逐个是否就位。
    - 脚本对「表达式出现次数 ≠1」「锚点不唯一」等情况一律拒绝盲改并报告原因——报告即结论，不要绕过。
 3. **确认备份就绪并展示还原命令**（打补丁前必须完成，AI 代执行时明确提示用户保存还原命令）：
-   - 思考等级：首次打补丁自动生成 `zcode.cjs.bak`（整文件备份）
-   - 状态栏：首次注入自动生成 `app.asar.tps.bak`（整包备份）+ `app.asar.tps-patch.json`（原始 index.html 记录）
-   - 统计图：sidecar `app.asar.chart-patch.json` 记录全部原始字节
-4. **展示执行命令与还原命令**——**单功能单命令，按用户点名的功能给对应命令，不要捆绑其他功能**（各补丁相互独立；低风险的思考等级/统计图 AI 可在核实与备份确认后直接代执行，重打包级的状态栏交由用户执行）。以「打开状态栏」为例：
+   - 档位配置：首次写入自动生成 `provider_config.json.reasoning-bak`
+   - 思考等级：首次打补丁自动生成 `zcode.cjs.bak`（整文件备份）+ `zcode.cjs.bak.meta.json`（指纹）
+   - 状态栏/滑条/拉取按钮：首次注入自动生成 `app.asar.<补丁>.bak`（整包备份，带 `.meta.json` 指纹）+ sidecar json
+   - 统计图/弹窗加宽：sidecar `app.asar.chart-patch.json` / `app.asar.width-patch.json` 记录全部原始字节
+   - **备份带版本指纹**：客户端升级覆盖内核/asar 后，旧备份指纹失配会被自动归档（改名 `.stale-<时间>`），
+     还原时若当前文件与备份不同版本会**拒绝执行**（提示用 `--force` 或 `restore_clean.py`），
+     避免"把旧版内核/asar 盖回新客户端"。
+4. **展示执行命令与还原命令**——**单功能单命令，按用户点名的功能给对应命令，不要捆绑其他功能**（各补丁相互独立；低风险的档位配置/思考等级/统计图 AI 可在核实与备份确认后直接代执行，重打包级的状态栏/滑条/拉取按钮交由用户执行）。以「打开状态栏」为例：
    ```bash
    # 执行
    python "<skill目录>/scripts/zcode_patcher.py" --tps-footer
    # 还原（万一异常，保存备用；完全退出 ZCode 后执行，还原后重启 ZCode）
    python "<skill目录>/scripts/zcode_patcher.py" --tps-footer --revert
    ```
+   3.14.x 配档位则是：
+   ```bash
+   python "<skill目录>/scripts/zcode_patcher.py" --reasoning-config          # 写入
+   python "<skill目录>/scripts/zcode_patcher.py" --reasoning-config --revert # 还原
+   ```
    人工自助时用户自行执行；AI 代执行时经用户确认后由 AI 运行，或用户复制命令自己跑。
-5. **重启验证**：完全退出并重启 ZCode（Windows 运行中锁 app.asar，打补丁前必须退出）后，按各功能的「验证」说明确认。
+   不确定会改什么时先加 `--dry-run` 预演（不写盘）。
+5. **重启验证**：完全退出并重启 ZCode（Windows 运行中锁 app.asar，打补丁前必须退出；脚本已内置进程预检）后，按各功能的「验证」说明确认。
 6. **失败回退**：执行上面展示的还原命令 → 重启 ZCode → 重新核实。思考等级补丁还原走 zcode.cjs.bak；状态栏还原自动清理 `.tps.bak` 与 sidecar。
 
 ## 跨平台约定
@@ -123,17 +159,20 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 
 ## 升级后自查清单
 
-ZCode 升级会覆盖 zcode.cjs 与 app.asar，升级后过一遍：
+ZCode 升级会覆盖 zcode.cjs 与 app.asar，升级后过一遍（**先完全退出 ZCode**；`--check` 不受此限）：
 
 ```bash
-python zcode_patcher.py --check            # 思考等级补丁状态
+python zcode_patcher.py --check                    # 思考等级：3.14+ 会提示"不需要本补丁"
+python zcode_patcher.py --reasoning-config --check # 档位配置（3.14+ 看这个）
 python zcode_patcher.py --usage-chart --check
 python zcode_patcher.py --model-width --check
 python zcode_patcher.py --tps-footer --check
+python zcode_patcher.py --thought-slider --check
 python zcode_patcher.py --model-puller --check
 ```
 
-失配的按「自助使用流程」重打；思考等级补丁在新内核上先 `--extract` 确认锚点可提取。
+失配的按「自助使用流程」重打；思考等级补丁在 ≤3.11 新内核上先 `--extract` 确认锚点可提取。
+重打包级补丁（状态栏/滑条/拉取按钮）被升级覆盖后直接重跑即可——旧备份会被自动归档，不会误还原。
 
 ## 一、思考等级：完整结论一张表
 

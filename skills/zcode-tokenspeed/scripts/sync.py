@@ -27,11 +27,12 @@ LOG = HERE / "_sync.log"
 
 # 配置键 -> (zcode_patcher.py 参数, 是否重打包级)
 PATCHES = [
+    ("reasoning_config", ["--reasoning-config"], False),   # 3.14+ 档位配置（配置侧原生）
     ("usage_chart", ["--usage-chart"], False),
     ("model_width", ["--model-width"], False),
     ("tps_footer", ["--tps-footer"], True),
     ("model_puller", ["--model-puller"], True),
-    ("core_patch", [], False),
+    ("core_patch", [], False),                             # ≤3.11 内核补丁
 ]
 
 DETACHED_PROCESS = 0x00000008

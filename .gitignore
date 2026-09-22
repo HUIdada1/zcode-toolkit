@@ -6,14 +6,24 @@ __pycache__/
 
 # 补丁运行时产物（备份 / 逐字节记录）——只属于本机
 *.bak
+*.bak.meta.json
+*.bak.stale-*
 *.tps.bak
 *.puller.bak
+*.slider.bak
 *.original.bak
 *-patch.json
 *.chart-patch.json
 *.tps-patch.json
 *.puller-patch.json
+*.slider-patch.json
+*.reasoning-bak
 *.tps-tmp
+*.tmp
+
+# 捕获/探测产物（含 API Key 与请求体，禁止入库）
+tap-capture*.jsonl
+probe-max-tokens*.jsonl
 
 # 编辑器 / 系统
 .vscode/
