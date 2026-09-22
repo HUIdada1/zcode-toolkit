@@ -5,7 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PLUGIN_ROOT}/skills/zcode-tokenspeed/scripts/sync.py\""
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/skills/zcode-tokenspeed/scripts/sync.py\" || python3 \"${CLAUDE_PLUGIN_ROOT}/skills/zcode-tokenspeed/scripts/sync.py\"",
+            "shell": true
           }
         ]
       }

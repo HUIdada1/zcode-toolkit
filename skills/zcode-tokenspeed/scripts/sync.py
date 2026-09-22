@@ -97,7 +97,7 @@ def read_options():
         return _coerce(found[0]), found[1]
     # 没找到条目：把 plugins 下的键名记下来，便于确认宿主的实际存储位置
     plugins = cfg.get("plugins") if isinstance(cfg, dict) else None
-    log(f"配置里没有 {PLUGIN_ID}；plugins 现有键: "
+    log(f"配置里没有 {PLUGIN_ID_PREFIX}；plugins 现有键: "
         f"{sorted(plugins) if isinstance(plugins, dict) else plugins}")
     return {}, None
 

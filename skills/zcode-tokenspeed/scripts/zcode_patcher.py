@@ -79,6 +79,9 @@ ZCode 客户端补丁工具
   同一模型同时出现在两个规则列表，否则整个供应商配置会降级为空）。
 
 用法：
+  python zcode_patcher.py --all --check         # 【推荐第一步】一条命令体检全部功能，只读不改
+  python zcode_patcher.py --all                 # 一次打上全部补丁（先完全退出 ZCode）
+  python zcode_patcher.py --all --revert        # 一次还原全部补丁
   python zcode_patcher.py                       # 思维强度补丁：自动探测全部安装并打（幂等）
   python zcode_patcher.py --check               # 只看思维强度补丁状态
   python zcode_patcher.py --revert              # 还原内核备份
@@ -92,6 +95,7 @@ ZCode 客户端补丁工具
   python zcode_patcher.py "D:\\ZCode"           # 只处理指定安装（安装根目录或 zcode.cjs 均可）
 
 通用开关：
+  --all       对所有功能生效（等价于同时给出下面全部补丁参数；配合 --check / --revert 用）
   --dry-run   只报告将要做的改动，不写盘（所有补丁通用）
   --force     跳过备份指纹校验（备份与当前文件对不上时强制继续，慎用）
   --verbose   打印安装探测的每一步结果（定位不到安装时用）
@@ -117,6 +121,27 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# 全部补丁的命令行参数名：--all 会一次性把它们打开（新增补丁时只需加进这里）
+ALL_PATCH_FLAGS = (
+    "reasoning_config",   # 3.14+ 档位配置（配置侧原生）
+    "usage_chart",
+    "model_width",
+    "tps_footer",
+    "thought_slider",
+    "model_puller",
+    "enhance_prompt",
+)
+
+
+def _expand_all(args) -> None:
+    """把 --all 展开成逐个补丁参数（原地修改 args）。
+
+    单独抽成函数是为了可测，并让「--all 到底覆盖了哪些补丁」有唯一事实来源
+    （ALL_PATCH_FLAGS）：新加补丁时只改常量，不会再出现「--all 漏了新功能」。
+    """
+    for name in ALL_PATCH_FLAGS:
+        setattr(args, name, True)
 
 # 兜底合成器：档位名 -> 各协议命名空间的线上参数
 # openai 侧按「原名透传」：智谱系自定义网关（如 workbuddy2api）的档位表是 low/high/max，
@@ -2401,6 +2426,10 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="打印安装探测的每一步结果")
     ap.add_argument("--extract", action="store_true",
                     help="按结构特征提取当前内核的档位解析函数锚点（新版本升级后用）")
+    ap.add_argument("--all", action="store_true",
+                    help="对所有功能生效（等价于同时给出全部补丁参数）："
+                         "`--all --check` 一条命令体检全部功能，`--all` 全部打上，"
+                         "`--all --revert` 全部还原")
     ap.add_argument("--reasoning-config", action="store_true",
                     help="【3.14+ 推荐】把 config.json 的档位写进 provider_config.json 的 "
                          "optionSpecs（原生机制，无需内核补丁）")
@@ -2431,6 +2460,9 @@ def main() -> int:
     ap.add_argument("--deep", action="store_true",
                     help="配合 --prune：连当前 .bak 与 sidecar 一起清（之后无法 --revert，慎用）")
     args = ap.parse_args()
+
+    if args.all:
+        _expand_all(args)
 
     global VERBOSE
     VERBOSE = args.verbose
@@ -2521,7 +2553,7 @@ def main() -> int:
                  lambda _t: process_reasoning_config(v2, args.check, args.revert,
                                                      dry_run=args.dry_run))
 
-    if not asar_flags and not args.reasoning_config:
+    if args.all or (not asar_flags and not args.reasoning_config):
         targets = resolve_target(args.target)
         if not targets:
             print("[!] 未探测到任何 ZCode 安装；请把安装目录路径作为参数传入（加 --verbose 看探测细节）")
@@ -2539,7 +2571,8 @@ def main() -> int:
             version = asar_version(targets[0].parent.parent / "app.asar")
         except Exception:
             pass
-        print(f"=== 客户端版本 {version or '未知'} | 探测到 {len(targets)} 处安装 | 模式：{mode} ===")
+        if not args.all:      # --all 时上面已打印过客户端版本横幅，避免重复
+            print(f"=== 客户端版本 {version or '未知'} | 探测到 {len(targets)} 处安装 | 模式：{mode} ===")
         for t in targets:
             run_step("思维强度内核补丁", t,
                      lambda tt: process(tt, args.check, args.revert, dry_run=args.dry_run,

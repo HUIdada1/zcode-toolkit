@@ -7,6 +7,15 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 
 > 本 skill 由 **zcode-tokenspeed 插件**提供，脚本就在本 skill 目录下的 `scripts/`（下文所有 `<skill目录>` 均指本目录）。
 
+**先跑这一条**（只读，不改任何文件，一条命令看全部 8 项功能的状态）：
+
+```bash
+python "<skill目录>/scripts/zcode_patcher.py" --all --check
+```
+
+`--all` = 对所有功能生效，等价于把所有补丁参数都写一遍；配合 `--check` 是体检、不带参数是全装、
+配合 `--revert` 是全还原。要单项操作时仍按后文的单功能命令来（`--all` 会覆盖单个参数）。
+
 ## 版本现状（动手前先看）
 
 补丁会随 ZCode 升级失效或过时，先确认目标版本，再决定打哪个：
@@ -21,7 +30,10 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 | ⑤ 模型拉取按钮 | 需要 | 需要，模板已按 `optionSpecs` 新格式写入 |
 | ⑥ 思考强度滑条 | 需要 | 需要 |
 | ⑦ 增强提示词 | —（新功能） | 需要：按钮经 preload 桥 / main handler 用当前选中的模型调一次补全；提示词模板内置 |
-| ⑦ 模型弹窗加宽 / 用量图 / 拉取按钮的重打包注入 | — | 升级会整体覆盖 app.asar，三个重打包级注入（④⑥⑤）需重跑 |
+
+> **升级会整体覆盖 app.asar**：除 ①（配置侧，写 `provider_config.json`）外，②–⑦ 升级后都需重跑。
+> 其中**重打包级**（④ TPS 状态栏 / ⑤ 模型拉取按钮 / ⑥ 思考强度滑条 / ⑦ 增强提示词）重跑时会按内容比对
+> 自动热更新脚本，无需先 `--revert`；② 用量图 / ③ 弹窗加宽是**字节级原地覆盖**，重跑即可。
 
 - 3.14.x 下**不要**再跑思考等级内核补丁（`python zcode_patcher.py` 不带参数那条）：脚本会明确提示
   「该内核使用 3.14+ 原生档位机制（optionSpecs），本补丁不适用」——这不是故障，是预期行为。
@@ -36,7 +48,8 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
   已在界面「手动配置」过的模型（`manualProviderModelRules`）会自动跳过——内核 schema 禁止同一
   模型同时出现在两个规则列表，重复声明会让整份供应商配置降级为空。
 - `model_pull.py` 与 `zcode-model-puller.js` 已适配新格式：拉取模型时直接写 `optionSpecs`，`--refresh` 会把旧 `reasoning` 条目迁移过来。
-- 通用开关（所有补丁适用）：`--dry-run` 只报告改动不写盘 · `--verbose` 打印安装探测细节 ·
+- 通用开关（所有补丁适用）：`--all` 对所有功能生效（等价于写全所有补丁参数）·
+  `--dry-run` 只报告改动不写盘 · `--verbose` 打印安装探测细节 ·
   `--force` 跳过备份指纹校验（慎用）· `--prune` 清理安装目录里的补丁产物
   （`--prune --deep` 连当前 `.bak` 与 sidecar 一起清，之后无法 `--revert`，需重打才有记录）。
   每次执行结束会打印「执行汇总」表（补丁 × 目标 × 成功/失败），失败项返回退出码 1。
@@ -47,7 +60,7 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 
 ### 插件开关（配置区）
 
-插件在 ZCode 的「设置 → 插件管理 → 已安装 → 点开插件」详情页里声明了 8 个开关。拨动开关并点「保存配置」后，插件会在**下次会话启动时**自动把客户端同步到该状态，不需要手动跑命令：
+插件在 ZCode 的「设置 → 插件 → 已安装 → 点开插件 → 高级信息 → 配置」里声明了 8 个开关。拨动开关并点「保存配置」后，插件会在**下次会话启动时**自动把客户端同步到该状态，不需要手动跑命令（插件的安装方式见仓库 README 的「安装」章节）：
 
 | 开关 | 控制的功能 | 生效时机 |
 |---|---|---|
@@ -107,9 +120,10 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
 两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --model-width --tps-footer --thought-slider --model-puller`。
+全部功能一条命令：`python zcode_patcher.py --all [--check/--revert]`（等价于写全上表所有补丁参数 + 内核补丁）。
 另有命令行版拉模型（不动 asar，直接同步 config.json + provider_config.json）：`python scripts/model_pull.py --all [--dry-run]`。
 
-**通用开关**：`--dry-run`（只报告改动不写盘）· `--verbose`（打印探测细节）· `--force`（跳过备份指纹校验，慎用）。
+**通用开关**：`--all`（对所有功能生效）· `--dry-run`（只报告改动不写盘）· `--verbose`（打印探测细节）· `--force`（跳过备份指纹校验，慎用）。
 
 ## 标准执行流程（AI 代执行与人工自助通用）
 
@@ -117,6 +131,8 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 
 1. **定位安装**：脚本自动探测（运行中进程 → 注册表 → 常见目录，跨 Windows/macOS/Linux，见「跨平台约定」）；探测不到就把安装根目录作为位置参数传入（加 `--verbose` 看每一步探测结果）。
 2. **只读核实**（能否生效的判断，全部只读，可放心先跑）：
+   - `python zcode_patcher.py --all --check`：**一条命令看全部 8 项**（含客户端版本、8 行执行汇总表）。
+     用户问「现在什么状态」「装好了吗」时先跑这条；下面各条是单项细看。
    - `python zcode_patcher.py --reasoning-config --check`：**3.14.x 先看这个**——哪些模型已配档位、哪些缺档位、哪些已在界面手动配置过（冲突会跳过）。
    - `python zcode_patcher.py --check`：内核补丁状态；输出「原生档位机制（optionSpecs），本补丁不适用」即 3.14+，直接走上面的 `--reasoning-config`；≤3.11 且版本不在「已知符号表」时跑 `--extract`——能提取出锚点即可生效，提取失败说明内核结构变了，按「新版本锚点提取」人工分析后再动。
    - `python zcode_patcher.py --usage-chart --check`：两个截断表达式是否命中。
@@ -163,7 +179,8 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 - 关键文件相对安装根目录固定：`resources/glm/zcode.cjs`（内核）、`resources/app.asar`（桌面端资源包）
 - Python ≥ 3.10，用系统可用的 `python3`/`python` 即可，脚本仅用标准库
 - 改动脚本后先跑回归测试：`python -m unittest discover -s tests -v`（纯标准库；含 asar 重打包往返、
-  备份指纹、档位配置迁移、注入代码语法、峰值内存约束等 44 个用例；本机装了 ZCode 时还会只读校验真实 asar 的 integrity）
+  备份指纹、档位配置迁移、注入代码语法、峰值内存约束等 57 个用例（数量以 `tests/` 实际为准）；
+  本机装了 ZCode 时还会只读校验真实 asar 的 integrity）
 - Program Files / /Applications 类目录可能需要管理员/sudo 权限
 - 执行 AI 可按上述规则自行定位安装（如 `ls /Applications`、查运行中进程的 exe 路径）
 
@@ -487,19 +504,49 @@ python zcode_patcher.py --thought-slider --revert    # 整体还原
 python zcode_patcher.py --thought-slider --slider-src /path/to/zcode-thought-slider.js
 ```
 
+### 样式规格（分段轨道）
+
+进度条 = 轨道 `.zslider-rail`（段容器）+ 每档一段 `.zslider-seg`（弱化底）+ 段内填充层 `.zslider-fill`
+（width 0↔100% 即点亮）+ 拖尾光斑 `.zslider-flare` + 扫光 `.zslider-shimmer`；轨道左侧是小人图标
+`.zslider-knob`（**固定前缀项**，不再跟随档位左右移动）。改样式只动 `ensureStyle()` 的样式表与内联几何，
+**不碰任何交互/提交逻辑**。
+
+- **段数**：默认 = 可用档位数；`__zsliderCtl.setSegments(n)` 可强制（2–8 段）。档位→段位按
+  `round(idx/(n-1)*(S-1))` 等比映射，点亮前 `lit+1` 段，`--zs-stagger`（i×45ms）让各段错开。
+- **主题**：颜色走 `--zs-*` 变量，判定顺序「应用主题类（`.dark`/`html.dark`/`body.dark`/`data-theme='dark'`）→
+  系统偏好 → 兜底」，与 TPS 同构。原实现只认 `prefers-color-scheme`，「应用深色 + 系统浅色」时轨道会
+  用浅色渐变压在深色面板上几乎看不见。
+- **几何**：厚度 `--zs-h`（8px）、段间隙 `--zs-gap`（4px）、段底色 `--zs-seg`、圆角统一 pill
+  （`--zs-r-pill`）；触控（`pointer:coarse`）热区撑到 40px。
+- **四态**（写在 `track` 的 `data-zs` 上，样式表按态下发）：`loading` 段级联弹入（`zsSegIn`，
+  延迟 40+i×35ms）+ 轨道扫光 → `dragging` 跟手增辉、逐段点亮不延迟 → `settling` 小人回弹
+  （`zsKnobPop`）+ 涟漪 → `idle` 静止（max 档时最后一段的填充层外发光呼吸 `zsBreathe` 2.6s）。
+- **`data-thinking`（与 `data-zs` 正交）**：思考中 = `1`，激活段依次流动（`zsFlow`，周期
+  `--zs-flow` = `CONFIG.flowMs`）、小人跑动；空闲 = `0`，小人定格站立帧、rAF 停掉不空转。
+- **时长统一**：填充与光斑共用 `--zs-dur`/`--zs-ease`；拖拽时把 `--zs-dur` 置 `0ms` 跟手，松手移除恢复。
+  `prefers-reduced-motion` 下时长归零、动画全关。
+- **响应式**：面板宽 `min(236px, 100vw - 24px)`；resize / 滚动时按 rAF 节流重新贴合入口。
+- **两个坑**：① `.zslider-seg` 的入场动画是**内联** `animation`，优先级高于样式表——所以 max 档呼吸
+  必须挂在**段内填充层**上，挂段盒子会被整个顶掉；② 重建段（切模型 / `setSegments`）时要
+  `insertBefore(..., .zslider-shimmer/.zslider-flare)`，否则新段会盖住扫光与光斑。
+- **调试接口**：`__zsliderCtl.config`（直接改参数）、`.setThinking(true|false|null)`（手动锁定/恢复自动）、
+  `.setSegments(n)`、`.refresh()`、`.state()`、`.diag()`。
+
 ### 原理（纯 DOM 观测 + 原生回调，零协议逆向）
 
 1. **读状态**：V4ComposerToolbar 渲染的隐藏 span（`className:"hidden"`）带 `data-thought`（当前档位）、`data-thought-levels`（该模型全部可用档位，逗号分隔）、`data-provider`/`data-model`，React 随会话实时更新——入口与面板 MutationObserver 监听其属性变化自动跟随原生操作（含 `t` 键循环切档），双向同步。
-2. **吸附档位动态**：取 `data-thought-levels`（off/minimal/low/medium/high/xhigh/max/ultra 等），模型配几档吸几档，不硬编码。
-3. **UI**：注入 `<style>` 隐藏原生触发器（`[data-composer-thought-control]:not([data-thought-level-fixed="true"])`，被隐藏的触发器仅作入口插入定位基准，`display:none` 元素的事件派发仍有效，菜单降级不受影响）；填充条带裁剪层（弹性过冲曲线会让 width 短暂超过 100%，必须裁住否则溢出轨道），光点/刻度独立于裁剪层悬浮。
+2. **段数与档位动态**：取 `data-thought-levels`（off/minimal/low/medium/high/xhigh/max/ultra 等），模型配几档就几段，不硬编码；切模型导致档位数变化时段数跟着重建。
+3. **UI**：注入 `<style>` 隐藏原生触发器（`[data-composer-thought-control]:not([data-thought-level-fixed="true"])`，被隐藏的触发器仅作入口插入定位基准，`display:none` 元素的事件派发仍有效，菜单降级不受影响）；每段各自 `overflow:hidden` 裁剪（弹性过冲会让 width 短暂超过 100%，必须裁住否则溢出段外），扫光与光斑作为覆盖层留在 rail 末尾、重建段时不覆盖它们。
 4. **写档位**（按优先级）：
    - React fiber：从触发器 DOM 沿 `__reactFiber$` return 链找 `memoizedProps` 含 `onValueChange` 且 `option.type==='select'` 带数组选项的组件，直调之——等价于用户点选菜单项，原生继续走 `session/setThoughtLevel` 会话 RPC；
    - 降级：模拟点击触发器打开 Radix 菜单，按 options 顺序点第 index 个 `[role="option"]`（档位显示名是 i18n 文案，按序号而非文本定位）。
 5. **注入**：与 TPS 同链路（index.html `</body>` 前挂 `<script>` + 新增脚本条目，整体重打包），sidecar `app.asar.slider-patch.json`、备份 `app.asar.slider.bak`，外科手术式还原只摘自己的 tag。
 6. **隐藏条件**：模型无思考档位（`data-thought-levels` 空）、探针未命中、原生触发器不存在——均自动隐藏，不占空间。
+7. **生成中判定**（驱动激活段流动 + 小人跑动，选择器来自 3.14.3 renderer bundle 实证，非猜测）：① 停止按钮在场——客户端把「停止生成」与「发送」做成同一按钮位的**互斥渲染**，`aria-label` 取 i18n `chat.stop`（中文「停止生成」/ 英文「Stop generating」）；② `[data-v4-running-live-tail]`（正在跑的轮次容器）；③ `[data-reasoning-streaming-line]`（更窄，仅推理流期间）。命中结果 250ms 复用，避免流式期间反复强制布局；可用 `__zsliderCtl.setThinking(true|false|null)` 手动锁定/恢复自动。
 
 ### 验证 / 排障
 
-- 渲染 console 查 `[zslider] 已就绪: low/medium/high/max 当前 max`（加载 5s 后自检）。
+- 渲染 console 查 `[zslider] 已就绪: low/medium/high/max 当前 max`（加载 5s 后自检）；`window.__zsliderCtl.state()` 看档位 / 段数 / 思考态快照。
 - 拖拽后原生下拉状态同步变化（入口档名/电量条、`t` 键联动）= fiber 路径生效；console 出现 `[zslider] 档位提交失败` = fiber 与菜单降级均未命中（版本结构大改，需按「原理」重新对锚点）。
+- 激活段不流动 / 小人站立 = 生成中判定没命中：先看 `__zsliderCtl.state().thinking`；`__zsliderCtl.setThinking(true)` 能出效果说明动效本身没问题，再查 `document.querySelector("button[aria-label*='停止']")` 确认自动判定（新版本改了 i18n 或按钮结构就要补 `THINK_SELECTORS`）。
 - 入口不出现：先看探针——`document.querySelector('[data-thought][data-thought-levels]')` 是否有值；当前模型未配思考档位时不显示属预期。

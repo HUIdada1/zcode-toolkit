@@ -713,11 +713,91 @@ class TestModuleSurface(unittest.TestCase):
         "REASONING_MAP_OPENAI", "REASONING_MAP_ANTHROPIC", "_desired_levels", "_v2_root",
         "TPS_SCRIPT_PATH", "SLIDER_SCRIPT_PATH", "PULLER_SCRIPT_PATH", "ENHANCE_SCRIPT_PATH",
         "TPS_TAG", "SLIDER_TAG", "PULLER_TAG", "ENHANCE_TAG",
+        # --all 一键操作
+        "ALL_PATCH_FLAGS", "_expand_all",
     ]
 
     def test_required_symbols_exist(self):
         missing = [n for n in self.REQUIRED if not hasattr(zp, n)]
         self.assertEqual(missing, [], f"模块缺少符号：{missing}")
+
+
+class TestAllFlag(unittest.TestCase):
+    """--all 是「一条命令体检/全装/全还原」的入口，必须真的覆盖到每一个补丁——
+    漏一个就是用户装完发现某个功能没生效，却从汇总表上看不出来。"""
+
+    def test_expand_all_sets_every_patch_flag(self):
+        import argparse
+        ns = argparse.Namespace(**{name: False for name in zp.ALL_PATCH_FLAGS})
+        zp._expand_all(ns)
+        off = [n for n in zp.ALL_PATCH_FLAGS if not getattr(ns, n)]
+        self.assertEqual(off, [], f"--all 没有打开这些补丁：{off}")
+
+    def test_every_flag_is_a_real_cli_option(self):
+        """ALL_PATCH_FLAGS 里写了名字但没加 add_argument → --all 直接 AttributeError。"""
+        r = subprocess.run([sys.executable, str(zp.__file__), "--help"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        missing = [n for n in zp.ALL_PATCH_FLAGS
+                   if "--" + n.replace("_", "-") not in r.stdout]
+        self.assertEqual(missing, [], f"这些补丁名不是真实命令行参数：{missing}")
+        self.assertIn("--all", r.stdout)
+
+    def test_all_covers_every_plugin_switch(self):
+        """插件开关表（sync.py 的 PATCHES）与 --all 必须一一对应，否则
+        「在插件里能开关、但命令行 --all 覆盖不到」这类不一致会悄悄存在。
+        例外只有 core_patch：它是无参数的内核补丁（≤3.11 专用）。"""
+        import sync
+        switch_keys = {key for key, _args, _repack in sync.PATCHES}
+        self.assertEqual(switch_keys - {"core_patch"}, set(zp.ALL_PATCH_FLAGS))
+
+    def test_kernel_patch_is_included_by_all(self):
+        """内核补丁没有命令行参数，--all 走的是 main() 里的分支条件，
+        这里守住「--all 时该分支一定会跑」这个前提。"""
+        src = Path(zp.__file__).read_text(encoding="utf-8")
+        self.assertIn("if args.all or (not asar_flags and not args.reasoning_config):", src)
+
+
+class TestMarketplaceManifest(unittest.TestCase):
+    """marketplace.json 与 plugin.json 的一致性。ZCode 对这两份清单有两条硬性要求，
+    违反了都不会在本地测试里露出来，只会表现成「装不上」或「永远不提示更新」：
+
+    * 市场条目的 name 必须等于插件清单的 name（否则安装直接报
+      `Plugin manifest name does not match marketplace entry`）
+    * 两处 version 必须同步（「检查更新」拿 marketplace.json 当最新版本、plugin.json 当已安装版本）
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _HERE.parent
+        cls.market_path = cls.root / "marketplace.json"
+        cls.manifest_path = cls.root / ".zcode-plugin" / "plugin.json"
+        if not cls.market_path.is_file() or not cls.manifest_path.is_file():
+            raise unittest.SkipTest("非插件形态布局（缺 marketplace.json / .zcode-plugin/plugin.json）")
+        cls.market = json.loads(cls.market_path.read_text(encoding="utf-8"))
+        cls.manifest = json.loads(cls.manifest_path.read_text(encoding="utf-8"))
+
+    def _entry(self) -> dict:
+        for p in self.market.get("plugins", []):
+            if p.get("name") == self.manifest["name"]:
+                return p
+        self.fail(f"marketplace.json 里没有名为 {self.manifest['name']} 的条目")
+
+    def test_entry_name_matches_plugin_manifest(self):
+        self.assertEqual(self._entry()["name"], self.manifest["name"])
+
+    def test_versions_are_in_sync(self):
+        self.assertEqual(self._entry().get("version"), self.manifest.get("version"),
+                         "marketplace.json 与 plugin.json 的 version 必须同步，否则「检查更新」永远不提示")
+
+    def test_source_resolves_to_the_plugin_root(self):
+        """source 相对市场根目录解析，必须落在含插件清单的目录上。
+        「插件与市场同仓库」时写作 "./"（去掉前缀后为空 = 市场根）。"""
+        src = str(self._entry()["source"])
+        target = (self.market_path.parent / src[2:] if src.startswith("./") else
+                  self.market_path.parent / src).resolve()
+        self.assertTrue((target / ".zcode-plugin" / "plugin.json").is_file(),
+                        f"source {src!r} 解析到 {target}，那里没有 .zcode-plugin/plugin.json")
 
 
 class TestInjectionBlocks(unittest.TestCase):
@@ -774,6 +854,44 @@ class TestInjectionBlocks(unittest.TestCase):
     def test_enhance_block_absent_when_not_injected(self):
         blob = b'_.contextBridge.exposeInMainWorld("zcode",{other:1});'
         self.assertEqual(zp._enhance_preload_state(blob)[:2], (False, False))
+
+
+class TestSliderScript(unittest.TestCase):
+    """滑条注入脚本：能加载 + 注释里承诺的调试接口真实存在。
+
+    这类「注释写了、代码里没有」的漂移肉眼 review 看不出来，`node --check` 也照样通过
+    （语法完全合法）——历史上 window.__zsliderCtl 就只存在于注释里。所以这里用最小 DOM 桩
+    把脚本真跑一遍，再核对接口成员。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = shutil.which("node") or shutil.which("node.exe")
+        if not cls.node:
+            raise unittest.SkipTest("本机没有 node，跳过滑条脚本检查")
+        cls.smoke = _HERE / "slider_smoke.js"
+        cls.script = None
+        for cand in (_HERE.parent / "scripts",
+                     _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"):
+            p = cand / "zcode-thought-slider.js"
+            if p.is_file():
+                cls.script = p
+                break
+        if cls.script is None or not cls.smoke.is_file():
+            raise unittest.SkipTest("未找到滑条脚本或冒烟脚本")
+
+    def _node(self, *args):
+        return subprocess.run([self.node, *args], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+
+    def test_slider_script_is_valid_js(self):
+        r = self._node("--check", str(self.script))
+        self.assertEqual(r.returncode, 0, f"滑条脚本语法错误：{r.stderr[:300]}")
+
+    def test_slider_loads_and_exposes_control_api(self):
+        r = self._node(str(self.smoke), str(self.script))
+        self.assertEqual(r.returncode, 0, f"冒烟测试失败：{(r.stdout + r.stderr)[:400]}")
+        self.assertIn("smoke OK", r.stdout)
 
 
 if __name__ == "__main__":
