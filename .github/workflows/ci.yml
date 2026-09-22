@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # README 声明「Python ≥ 3.10」，这里就用 3.10 兜底，防止误用更高版本才有的 API
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # 目录名兼容两种仓库布局：扁平 scripts/ 与插件 skills/zcode-tokenspeed/scripts/
+      - name: 语法检查（Python）
+        run: |
+          set -e
+          for d in scripts skills/zcode-tokenspeed/scripts; do
+            [ -d "$d" ] || continue
+            python -m py_compile "$d"/*.py
+          done
+
+      - name: 语法检查（注入脚本）
+        run: |
+          set -e
+          for d in scripts skills/zcode-tokenspeed/scripts; do
+            [ -d "$d" ] || continue
+            for f in "$d"/*.js; do node --check "$f"; done
+          done
+
+      - name: 回归测试
+        run: python -m unittest discover -s tests -v
