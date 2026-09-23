@@ -1537,6 +1537,138 @@ class TestSyncModes(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "")
 
 
+class TestSyncStaleIsReinjected(unittest.TestCase):
+    """★ 回归：「插件更新了，但补丁没跟着更新」这一类**静默失效**（0.6.1 修复）。
+
+    真实故障现场（用户报的：换了台电脑从市场更新插件、退出重启，润色还是不生效）：
+      1. 插件市场「更新」只替换**插件目录**，**不会**重新注入 `app.asar`；
+      2. 此时 asar 里躺的是上一版的注入片段；
+      3. `--check` 输出「增强提示词注入: **已打**（含旧版组件，重跑可自动更新）」；
+      4. `check_state()` 只做子串匹配，看到「已打」就返回 `on`；
+      5. `run_sync()` 判 `want=True, state=on` → `continue`（视为已一致）；
+      6. 结果：**永远不会重跑注入**，用户等多久都不生效，而且日志里一句
+         「未处理」都没有 —— 只有一个彻底静默的「无事可做」。
+
+    这个坑的恶劣之处是它**不报错**：心跳正常、日志正常、开关全开，界面也显示
+    「已打」，唯一的表现是「修复没生效」。所以必须把 stale 态单独测出来。
+    """
+
+    def setUp(self):
+        import sync
+        self.sync = sync
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER)
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-stale-", ignore_cleanup_errors=True)
+        d = Path(self._tmp.name)
+        sync.CONFIG = d / "config.json"        # 不存在 → 走插件清单默认值（全开）
+        sync.STAMP = d / "_sync.last"
+        sync.LOG = d / "_sync.log"
+        sync.MARKER = d / "_autoinject.done"
+
+    def tearDown(self):
+        (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
+         self.sync.MARKER) = self._orig
+        self._tmp.cleanup()
+
+    # ---------- check_state 必须把「内容旧」和「已最新」分开 ----------
+
+    def test_check_state_maps_old_components_to_stale_not_on(self):
+        """`--check` 说「含旧版组件」时必须是 stale，不能是 on。
+
+        这一条盯着的是一个**判断顺序**陷阱：`--check` 的两种措辞
+        「已打（含旧版组件，重跑可自动更新）」与「已打（四组件均为当前版本）」**都含「已打」**。
+        只要 `if "已打" in out` 排在 `if "含旧版组件" in out` 前面，
+        stale 分支就永远走不到 —— 而这正是修复前的状态。
+        """
+        sync = self.sync
+        samples = {
+            "已打（含旧版组件，重跑可自动更新）": "stale",
+            "已打": "on",
+            "未打": "off",
+            "本补丁不适用": "na",
+            "完全看不懂的措辞": "unknown",
+        }
+        for text, want in samples.items():
+            with self.subTest(text=text):
+                orig_run = sync.subprocess.run
+
+                class _R:
+                    returncode = 0
+                    stdout = text
+                    stderr = ""
+
+                sync.subprocess.run = lambda *a, **k: _R()
+                try:
+                    self.assertEqual(sync.check_state(["--enhance-prompt"]), want,
+                                     f"{text!r} 应判为 {want}")
+                finally:
+                    sync.subprocess.run = orig_run
+
+    def test_stale_branch_is_checked_before_generic_da(self):
+        """源码层面再钉一次顺序：`含旧版组件` 必须出现在裸 `已打` 之前。
+
+        上面那条靠打桩喂字符串，能验证语义；这条直接查源码顺序，
+        防止以后有人「顺手」把两个 if 调换回来（调换后单测仍会红，
+        但这条给出的报错更直指根因）。
+        """
+        import inspect
+        src = inspect.getsource(self.sync.check_state)
+        self.assertIn("含旧版组件", src)
+        i_stale = src.index("含旧版组件")
+        # 找裸 "已打" 判断（排除 "未打" 里不含此串、以及 stale 注释里的提及）
+        i_plain = src.index('if "已打" in out')
+        self.assertLess(i_stale, i_plain,
+                        '判断顺序反了：`if "已打" in out` 会先命中，stale 永远走不到')
+
+    # ---------- run_sync 必须真的重新安排注入 ----------
+
+    def test_stale_repack_patch_is_rescheduled_for_watchdog(self):
+        """重打包级补丁（enhance/puller）stale 时必须转交看护，而不是被跳过。"""
+        states = {("--enhance-prompt",): "stale"}
+        with patcher_stubbed(self.sync, states=states) as calls:
+            summary = quiet(self.sync.run_sync)
+        watchdogs = [c for c in calls if c[0] == "watchdog"]
+        self.assertEqual(len(watchdogs), 1, f"必须挂载看护，实际调用：{calls}")
+        self.assertTrue(watchdogs[0][1].get("enhance_prompt"),
+                        "看护的 --want 里必须带上 enhance_prompt")
+        self.assertIn("重注入为新版", summary,
+                      "摘要要说清「插件已更新、退出时重注入」，不能静默")
+
+    def test_stale_non_repack_patch_is_applied_immediately(self):
+        """非重打包级补丁（usage_chart 等）stale 时应当**当场**重跑。"""
+        states = {("--usage-chart",): "stale"}
+        with patcher_stubbed(self.sync, states=states) as calls:
+            summary = quiet(self.sync.run_sync)
+        runs = [c for c in calls if c[0] == "run" and c[1] == ("--usage-chart",)]
+        self.assertEqual(len(runs), 1, f"应当场重跑一次，实际：{calls}")
+        self.assertFalse(runs[0][2], "stale 且 want=True 时不应走还原")
+        self.assertIn("更新为当前版本", summary)
+
+    def test_stale_with_switch_off_reverts_instead_of_updating(self):
+        """开关是关的、装的却是旧版 → 直接还原（不必先更新再还原绕一圈）。"""
+        states = {("--enhance-prompt",): "stale"}
+        # 让 enhance_prompt 的期望值为 False
+        orig_resolve = self.sync.resolve_wanted
+        self.sync.resolve_wanted = lambda: ({"enhance_prompt": False}, "测试")
+        try:
+            with patcher_stubbed(self.sync, states=states) as calls:
+                quiet(self.sync.run_sync)
+        finally:
+            self.sync.resolve_wanted = orig_resolve
+        runs = [c for c in calls if c[0] == "run" and c[1] == ("--enhance-prompt",)]
+        self.assertEqual(len(runs), 1, f"应还原一次，实际：{calls}")
+        self.assertTrue(runs[0][2], "want=False 时 revert 必须为 True")
+
+    def test_up_to_date_patch_is_left_alone(self):
+        """对照组：真正最新的补丁不该被反复重写 —— 否则每次会话启动都重打包 asar。"""
+        states = {("--enhance-prompt",): "on", ("--tps-footer",): "on"}
+        with patcher_stubbed(self.sync, states=states) as calls:
+            summary = quiet(self.sync.run_sync)
+        self.assertEqual([c for c in calls if c[0] == "run" and
+                          c[1] == ("--enhance-prompt",)], [],
+                         "已是最新就不该重跑")
+        self.assertNotIn("重注入为新版", summary)
+
+
 class TestAutoInject(unittest.TestCase):
     """零配置自动注入 —— 「从插件市场装完就能用」这条要求就靠它落地。
 
@@ -2227,6 +2359,73 @@ class TestDoctorAutoInjectWording(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("★ 卡点", out)
         self.assertIn("从未运行过", out)
+
+
+class TestDoctorFlagsStaleInjection(unittest.TestCase):
+    """自检第 8 节必须**点名**「已打但装的是旧版片段」。
+
+    这条对应的是最难自查的一类故障：插件更新了、退出重启了、自检全绿，
+    但新修的功能就是不生效。原因是 `app.asar` 里还是旧片段，
+    而「已打」这两个字在界面上看起来毫无异常。
+
+    如果自检不把「含旧版组件」单独拎出来说，用户唯一的线索就是
+    「我觉得应该生效了但没生效」—— 排查方向会完全跑偏到模型配置/网络上去。
+    """
+
+    def _run_with(self, check_output):
+        import doctor
+        orig = doctor.subprocess.run
+
+        class _R:
+            returncode = 0
+            stdout = check_output
+            stderr = ""
+
+        doctor.subprocess.run = lambda *a, **k: _R()
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                doctor.check_patches()
+        finally:
+            doctor.subprocess.run = orig
+        return buf.getvalue()
+
+    _STALE = ("=== 增强提示词注入，目标 1 处，模式：检查 ===\n"
+              "[*] D:\\ZCode\\resources\\app.asar\n"
+              "    增强提示词注入: 已打（含旧版组件，重跑可自动更新） | "
+              "renderer 脚本: 有 | main handler: 有（版本旧）\n")
+
+    _CURRENT = ("=== 增强提示词注入，目标 1 处，模式：检查 ===\n"
+                "[*] D:\\ZCode\\resources\\app.asar\n"
+                "    增强提示词注入: 已打 | renderer 脚本: 有 | "
+                "main handler: 有\n")
+
+    def test_stale_state_is_called_out_with_fix(self):
+        out = self._run_with(self._STALE)
+        self.assertIn("旧版片段", out, "必须点名「旧版片段」，不能混在「已打」里过去")
+        self.assertIn("不会重新注入 app.asar", out, "要解释为什么退出重启也没用")
+        self.assertIn("--all", out, "要给出可执行的手动修复命令")
+
+    def test_current_state_does_not_trigger_the_stale_warning(self):
+        """对照组：真正最新的状态不该出现这条警告，否则用户会照着白改一遍。"""
+        out = self._run_with(self._CURRENT)
+        self.assertNotIn("旧版片段", out)
+
+    def test_patcher_check_output_uses_the_documented_stale_wording(self):
+        """`--check` 的措辞是 doctor 与 sync 共同依赖的接口，不能随手改。
+
+        这个串同时被两处消费：
+          * `sync.check_state()` 据此返回 `stale`（要求重跑注入）
+          * `doctor.check_patches()` 据此提示用户
+        改掉「含旧版组件」这几个字会让**两边同时静默失效** —— 又回到
+        「全绿但不生效」的老坑。所以在这里把措辞本身钉死。
+        """
+        src = (Path(__file__).resolve().parent.parent
+               / "skills" / "zcode-tokenspeed" / "scripts" / "zcode_patcher.py")
+        text = src.read_text(encoding="utf-8")
+        self.assertIn("含旧版组件，重跑可自动更新", text,
+                      "zcode_patcher.py 改变了旧版组件的措辞；"
+                      "sync.check_state 与 doctor 都依赖它，必须同步更新")
 
 
 class TestPluginHookSpec(unittest.TestCase):

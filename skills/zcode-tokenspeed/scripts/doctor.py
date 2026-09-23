@@ -627,6 +627,17 @@ def check_patches() -> None:
     for ln in out.splitlines():
         print(f"    {ln}")
 
+    # ★ 「已打但装的是旧版」必须单独点出来。它的表现和「已是最新」在肉眼上极像
+    # （都是「已打」），但含义完全相反：前者说明**插件更新过、补丁却没跟着更新**。
+    # 插件市场「更新」只替换插件目录，**不会**重新注入 app.asar —— 用户按提示
+    # 退出重启多少次都不会生效，而这一刻正是唯一能看出问题的地方。
+    stale = [ln for ln in out.splitlines() if "含旧版组件" in ln]
+    if stale:
+        print(f"{WARN} 有 {len(stale)} 项注入的是**旧版片段**（插件更新过，但 app.asar 没跟着更新）。")
+        print("    插件市场「更新」只替换插件目录，不会重新注入 app.asar —— 所以退出重启也不会变。")
+        print("    0.6.1 起同步脚本会自动识别并重跑；旧版本请手动修（**完全退出 ZCode 后**执行）：")
+        print(f'      python "{PATCHER}" --all')
+
 
 def verdict(py_ok: bool, zcode_ok: bool, has_plugin: bool, enabled: bool,
             saved: bool, hook_ok: bool, fired: bool, log_info: dict | None = None) -> None:

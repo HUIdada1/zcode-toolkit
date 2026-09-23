@@ -908,6 +908,7 @@ div[data-v4-timeline-scroll]          ← overflow-y-auto，真正的滚动宿�
 
 | 现象 | 处理 |
 |---|---|
+| ★ **更新插件 + 退出重启后仍不生效** | ★ 插件市场「更新」只换插件目录，**不重新注入 app.asar**；而 ≤0.6.0 的同步脚本看到 `--check` 输出里的「已打」就判成 `on` → 永远跳过重跑 → 旧片段永远留在 asar 里，**且不报任何错**。判定：`--enhance-prompt --check` 出现「含旧版组件」即是。**0.6.1+ 已自动识别（新 `stale` 态）**；旧版手动 `--all`。详见「插件更新≠补丁更新」 |
 | 报 `Model is unavailable` | ★ 解析没命中界面所选模型。跑 `enhance_doctor.py --model-value "<providerId>/<modelId>"` 看 `how=`；`ref` 之外都要查：① 选中供应商是否只在 `provider_config.json` 里（旧版 handler 读的是 `config.json`，见上文 0.5.10）；② 该供应商是否被 `systemDisabledReason` 禁用 |
 | 按钮跑到消息区 / 看不见 | ★ 挂载点跑出了 composer dock。升级到 **0.5.11+**；确认注入也是新版（`--dry-run`）。诊断看 `window.__zenhanceDiag.reattaches`（>0 = 发生过自愈）与 `hiddenReason` |
 | 升级到 0.5.10 后仍报错 | 确认**注入**也升到了新版：`--enhance-prompt --dry-run` 看是否有「将热更新…（X → Y 字节）」。`--check` 只看挂载标记，不比对脚本内容 |
@@ -920,6 +921,44 @@ div[data-v4-timeline-scroll]          ← overflow-y-auto，真正的滚动宿�
 > 注意 `Upstream request failed` 是 vercel-ai 网关的错误措辞（对应
 > `GatewayModelNotFoundError`），属**模型维度**判定（不在套餐内 / 已下线），
 > **与地区限制、代理无关**。地域封锁表现为 403 或连接重置。
+
+### ★★ 插件更新 ≠ 补丁更新：`stale` 态为什么必须独立存在（0.6.1 修复）
+
+**跨机复现的真实故障**：用户在另一台电脑从插件市场「更新」插件 → 按提示退出并重启
+→ 润色新修的功能（0.5.11 的按钮定位）**仍然不生效**；跑 `doctor.py` 一路全绿。
+
+链路是一条**全静默**的失效：
+
+1. 插件市场「更新」只替换**插件目录**（`cache/<市场>/<插件名>/<版本>/`），
+   **不重新注入 `app.asar`** —— asar 里还是上一版的注入片段；
+2. `zcode_patcher.py --check` 会明确给出两种措辞：
+   `已打（含旧版组件，重跑可自动更新）` / `已打（四组件均为当前版本）`；
+3. 但 ≤0.6.0 的 `sync.check_state()` 只做子串匹配：
+   ```python
+   if "未打" in out: return "off"
+   if "已打" in out: return "on"     # ← 两种措辞都含「已打」，全被判成 on
+   ```
+4. `run_sync()` 拿到 `want=True, state=on` → `continue`（视为已一致）
+   → **永远不会重跑注入**；
+5. 结果：心跳正常、日志干净、`doctor` 全绿、`--check` 也显示「已打」，
+   唯一表现是「修复没生效」——**没有任何一处会报错**。
+
+**修复（0.6.1）**：`check_state()` 新增第四态 `stale`，把「已打但内容旧」单独分出来。
+
+* **判断顺序是硬性要求**：`if "含旧版组件" in out: return "stale"`
+  **必须排在** `if "已打" in out` **之前** —— 前者本身含「已打」，顺序反了
+  `stale` 分支永远走不到。已有两条回归测试分别从**语义**（喂字符串）和
+  **源码顺序**（`inspect.getsource`）两个角度钉死它。
+* `run_sync()` 对 `stale`：重打包级补丁转交看护并报
+  「插件已更新，客户端退出时重注入为新版」；非重打包级**当场重跑**；
+  若开关是关的直接还原（不必先更新再还原绕一圈）。
+* `doctor.py` 第 8 节末尾会点名「有 N 项注入的是**旧版片段**」。
+
+**给用户的一句话**：重打包级功能（TPS 状态栏 / 滑条 / 润色 / 拉取按钮）在插件更新后，
+仍要等**下一次完全退出 ZCode** 才由看护重新写入 —— 光重启不够，
+因为「重启」期间看护会被先起来的 ZCode 挡住（它等的是**退出**）。
+
+
 
 ### 连带修复：Windows 瞬时占用写不进补丁
 

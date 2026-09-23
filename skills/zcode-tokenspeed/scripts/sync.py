@@ -212,16 +212,28 @@ def read_options():
 
 
 def check_state(args) -> str:
-    """跑 --check 判断当前注入状态：on / off / na（本版本不适用）/ unknown。
+    """跑 --check 判断当前注入状态：on / stale / off / na（本版本不适用）/ unknown。
 
     `na` 是必需的第三态：例如 ≤3.11 专用的内核补丁在 3.14+ 上会明确打印
     「本补丁不适用」。旧逻辑只看「未打」→ 把它当成 off → 去执行 → 脚本空转一圈，
     最后却报成「已生效」。默认值全开之后，这个误报每次装完都会出现，必须区分开。
 
-    `--reasoning-config` 是**另一套措辞**，必须单独识别：它不打 asar、只写
-    `provider_config.json`，输出是「[ ] …（新建规则）」/「[=] 档位配置已是最新，无需写入」，
-    一个 `已打/未打/不适用` 都没有。早期漏了这条分支 → 每次都判成 unknown →
-    报「未处理: reasoning_config(状态未知)」，于是这个开关**既不会被写入也不会被还原**。
+    ★ `stale`（已打但内容旧）是 0.6.1 补的第四态，修的是一类**最容易被误判成
+    「已生效」**的场景：
+
+        插件更新到新版（注入脚本改了，比如 0.5.11 的按钮跑出输入框修复）
+        → 用户按提示退出并重启 ZCode
+        → 但 app.asar 里的注入片段**还是旧版**，因为「更新插件」只换了插件目录，
+          **不会**重新注入 app.asar
+
+    旧逻辑把 `--check` 输出里的「已打」一律当成 on，于是 `run_sync` 走
+    `continue`（视为已一致）→ **永远不会重跑注入** → 用户看到的改动永远不生效，
+    而且报告里一句「未处理」都没有，只有一个可疑的静默。
+
+    判据是 zcode_patcher.py 自己在 `--check` 里给出的两种措辞：
+      * 「已打（含旧版组件，重跑可自动更新）」   → 四组件齐但内容 != 现行实现
+      * 「已打（四组件均为当前版本），跳过」     → 真正的最新
+    前者必须归为 stale（要求重跑），不能归为 on。
     """
     r = subprocess.run([sys.executable, str(PATCHER), *args, "--check"],
                        capture_output=True, encoding="utf-8", errors="replace",
@@ -236,6 +248,10 @@ def check_state(args) -> str:
         # 否则就是有 [ ] 待写入项 → off。别用「已是最新」判：该词在有待写入项时也会打印
         # （指的是另外 N 个已配好的模型），会误判成 on。
         return "on" if "无需写入" in out else "off"
+    # 「已打（含旧版组件，重跑可自动更新）」必须排在 "已打" 之前判：
+    # 这个串本身包含 "已打"，顺序反了就会被后面那条吃掉，stale 永远走不到。
+    if "含旧版组件" in out:
+        return "stale"
     if "未打" in out:
         return "off"
     if "已打" in out:
@@ -311,7 +327,7 @@ def run_sync(echo: bool = False) -> str:
     if not wanted:
         return "既没有已保存的开关，也读不到插件清单默认值 → 未做任何操作"
 
-    changed, deferred, failed, skipped = [], {}, [], []
+    changed, deferred, failed, skipped, refreshed = [], {}, [], [], []
     for key, args, repack in PATCHES:
         if key not in wanted:
             continue
@@ -322,6 +338,32 @@ def run_sync(echo: bool = False) -> str:
             continue
         if state == "unknown":
             failed.append(f"{key}(状态未知)")
+            continue
+        if state == "stale":
+            # 已装的是旧版注入片段 → 无论开关要求开还是关，都必须重跑一次：
+            #   want=True  → 重跑会把四组件更新到与现行脚本一致
+            #   want=False → 反正要还原，直接走还原分支，不必先更新
+            if not want:
+                verdict = run_patcher(args, revert=True)
+                if verdict == "ok":
+                    changed.append(f"{key}→关")
+                elif verdict == "refused":
+                    deferred[key] = False
+                else:
+                    failed.append(f"{key}(执行失败)")
+                continue
+            if repack:
+                deferred[key] = want
+                refreshed.append(key)
+                continue
+            verdict = run_patcher(args, revert=False)
+            if verdict == "ok":
+                changed.append(f"{key}→开（更新为当前版本）")
+            elif verdict == "refused":
+                deferred[key] = want
+                refreshed.append(key)
+            else:
+                failed.append(f"{key}(更新失败)")
             continue
         if want and state == "off":
             need_revert = False
@@ -347,9 +389,14 @@ def run_sync(echo: bool = False) -> str:
     parts = []
     if changed:
         parts.append("已写入: " + "、".join(changed))
-    if deferred:
+    if refreshed:
+        parts.append("插件已更新，客户端退出时重注入为新版（下次启动可见）: "
+                     + "、".join(refreshed))
+    # 排除已在 refreshed 里说明过的键，避免同一项被报两遍（一个空串也是这个原因）
+    rest = {k: v for k, v in deferred.items() if k not in refreshed}
+    if rest:
         parts.append("ZCode 退出时写入（下次启动可见）: " + "、".join(
-            f"{k}→{'开' if v else '关'}" for k, v in deferred.items()))
+            f"{k}→{'开' if v else '关'}" for k, v in rest.items()))
     if skipped:
         parts.append("本版本不适用: " + "、".join(skipped))
     if failed:
