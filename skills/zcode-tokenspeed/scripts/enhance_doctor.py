@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-r"""增强提示词（润色按钮）链路诊断 —— 只读，不发任何真实补全请求。
+r"""增强提示词（润色按钮）链路诊断 —— 只读，默认不发任何真实补全请求。
 
-定位「本机能润色、别人报 HTTP 400 Model is unavailable」这类跨机差异。
+定位「润色没用界面当前选中的模型 / 报 HTTP 400 Model is unavailable」这类跨机差异。
 
     python enhance_doctor.py                 # 完整体检
     python enhance_doctor.py --json          # 机器可读
     python enhance_doctor.py --probe         # 额外做真实连通性探测（会消耗极少量额度）
     python enhance_doctor.py --probe --only <providerId>
+    python enhance_doctor.py --model-value "bc73e3ab-.../glm-5.3" --model-label "glm-5.3"
 
 它逐段复刻 app.asar 里 `zcode:enhance-prompt` handler 的解析逻辑，因此
 **本脚本判定用哪个供应商/模型，就等于润色按钮实际会用哪个**。
 
 检查顺序（与 handler 一一对应）：
   1. 数据根定位（setting.json 的 dataBaseDir 优先，退回 ~/.zcode/v2）
-  2. config.json 能否解析、provider 段结构
-  3. 模型解析三档（① 界面 ref ② 显示名反查 ③ 兜底首个自定义供应商）
-     ③ 兜底是「模型不可用」的高发区 —— 它会把请求打到不相干的供应商上
-  4. 命中供应商的关键字段：baseURL / apiKey / kind / enabled / systemDisabledReason
+  2. 两份配置：provider_config.json（**权威**，客户端就是从这里发请求）与
+     config.json（旧格式，可能长期不更新）
+  3. 归一化后的候选表 + 模型解析四档（① ref ② ref-label ③ label ④ fallback）
+     ④ 兜底是「模型不可用」的高发区 —— 它会把请求打到不相干的供应商上
+  4. 命中供应商的关键字段：baseURL / apiKey / kind
   5. 请求构造复核：URL 拼接、鉴权头、max_tokens（会被供应商上限卡 400）
   6. --probe 时的真实 HTTP 探测 + 错误码归因
 
@@ -45,13 +47,10 @@ except ImportError:
 OK = "[OK]"
 BAD = "[!!]"
 WARN = "[!]"
-INFO = "[i]"
 
 MAX_TOKENS = 2048          # 与 handler 一致
 TIMEOUT = 60000
 
-
-# ------------------------------------------------------------------ 步骤 1
 
 def resolve_root() -> tuple[Path, str]:
     """复刻 handler：先读 <home>/.zcode/v2/setting.json 的 dataBaseDir，否则用默认。"""
@@ -73,80 +72,194 @@ def resolve_root() -> tuple[Path, str]:
     return base / ".zcode" / "v2", how
 
 
-# ------------------------------------------------------------------ 步骤 3
+def _read_json(p: Path):
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
-def resolve_model(cfg: dict, mv: str, ml: str) -> tuple[dict | None, str]:
-    """逐字复刻 handler 的 ①②③ 三档解析。返回 (pick, how)。"""
-    prov = cfg.get("provider") or {}
-    ml = str(ml or "").strip().lower()
 
-    if mv:
-        k = mv.find("/")
-        if k > 0:
-            pid, mid = mv[:k], mv[k + 1:]
-            pp = prov.get(pid)
-            if isinstance(pp, dict) and (pp.get("models") or {}).get(mid):
-                return {"pid": pid, "mid": mid, "p": pp}, "ref"
+def zkind(t: str) -> str:
+    t = str(t or "").lower()
+    if "anthropic" in t:
+        return "anthropic"
+    return "openai-compatible"
+
+
+def build_candidates(root: Path) -> tuple[list[dict], dict, list[str], dict]:
+    """复刻 handler 的候选表构建：provider_config.json 优先，config.json 补缺。"""
+    by_id: dict[str, dict] = {}
+    notes: list[str] = []
+    stats: dict = {}
+
+    pcp = root / "provider_config.json"
+    pccands: list[dict] = []
+    raw = _read_json(pcp)
+    if raw is not None:
+        pc = raw.get("config") if isinstance(raw, dict) and "config" in raw else raw
+        if isinstance(pc, dict):
+            rules = ((pc.get("providerConfigRules") or {}).get("providerRules")) or []
+            pm: dict[str, list[str]] = {}
+            for r in ((pc.get("modelConfigRules") or {}).get("providerModelRules")) or []:
+                pid = str(r.get("providerId") or "")
+                if pid:
+                    pm.setdefault(pid, []).append(str(r.get("modelId") or ""))
+            for r in rules:
+                pid = str(r.get("providerId") or "")
+                if not pid:
+                    continue
+                c = r.get("config") or {}
+                acc = c.get("access") or {}
+                api = c.get("api") or {}
+                models = {}
+                for i in list(c.get("personalModelIds") or []) + pm.get(pid, []):
+                    s = str(i or "").strip()
+                    if s and s not in models:
+                        models[s] = {"name": s}
+                pccands.append({
+                    "pid": pid,
+                    "name": str(r.get("providerName") or ""),
+                    "kind": zkind(api.get("type")),
+                    "baseURL": str(api.get("baseUrl") or ""),
+                    "apiKey": str(acc.get("apiKey") or ""),
+                    "models": list(models),
+                    "systemDisabledReason": (c.get("systemDisabledReason")
+                                             or r.get("systemDisabledReason")),
+                    "source": "provider_config.json",
+                })
+        stats["provider_config.json"] = len(pccands)
+    else:
+        stats["provider_config.json"] = None
+        notes.append(f"{WARN} 读不到 {pcp}（客户端可能用其它数据根，或从未配置过）")
+
+    cfgcands: list[dict] = []
+    cf = root / "config.json"
+    raw2 = _read_json(cf)
+    if isinstance(raw2, dict):
+        for pid, pp in (raw2.get("provider") or {}).items():
+            if not isinstance(pp, dict):
+                continue
+            o = pp.get("options") or {}
+            cfgcands.append({
+                "pid": pid,
+                "name": str(pp.get("name") or ""),
+                "kind": str(pp.get("kind") or "openai-compatible"),
+                "baseURL": str(o.get("baseURL") or ""),
+                "apiKey": str(o.get("apiKey") or ""),
+                "models": list((pp.get("models") or {}).keys()),
+                "systemDisabledReason": pp.get("systemDisabledReason"),
+                "source": "config.json",
+            })
+        stats["config.json"] = len(cfgcands)
+    else:
+        stats["config.json"] = None
+
+    for c in pccands:
+        by_id[c["pid"]] = c
+    merged = list(pccands)
+    for c in cfgcands:
+        if c["pid"] in by_id:
+            continue
+        merged.append(c)
+        by_id[c["pid"]] = c
+
+    # 差异审计：同一 providerId 在两份配置里是否一致
+    audit = {}
+    pc_map = {c["pid"]: c for c in pccands}
+    for c in cfgcands:
+        p = pc_map.get(c["pid"])
+        if not p:
+            continue
+        diffs = []
+        if p["baseURL"] and c["baseURL"] and p["baseURL"] != c["baseURL"]:
+            diffs.append(f"baseURL: {c['baseURL']} (config) vs {p['baseURL']} (provider_config)")
+        if p["apiKey"] and c["apiKey"] and p["apiKey"] != c["apiKey"]:
+            diffs.append("apiKey 两处不一致（provider_config.json 才是生效的）")
+        if set(p["models"]) != set(c["models"]):
+            only_pc = sorted(set(p["models"]) - set(c["models"]))
+            only_cfg = sorted(set(c["models"]) - set(p["models"]))
+            diffs.append(f"模型列表不同: 仅 provider_config={only_pc} 仅 config={only_cfg}")
+        if diffs:
+            audit[c["pid"]] = diffs
+    return merged, by_id, notes, {"stats": stats, "audit": audit}
+
+
+def resolve(cands: list[dict], by_id: dict, mv: str, ml_raw: str):
+    """逐字复刻 handler 的四档解析。"""
+    ml = str(ml_raw or "").strip().lower()
+    tried: list[str] = []
+
+    def usable(c):
+        if not c or c.get("systemDisabledReason"):
+            return False
+        return bool(str(c.get("baseURL") or "").strip() and str(c.get("apiKey") or "").strip())
+
+    def cand(pid, mid, n):
+        c = by_id.get(pid)
+        tried.append(f"{n}:{pid}/{mid}" + ("" if usable(c) else "(跳过:不可用)"))
+        if not usable(c):
+            return None
+        return {"pid": pid, "mid": mid, "how": n, "c": c}
+
+    def models_of(pid):
+        c = by_id.get(pid)
+        return c["models"] if c else []
+
+    if mv and "/" in mv:
+        k = mv.index("/")
+        pid, mid = mv[:k], mv[k + 1:]
+        if mid in models_of(pid):
+            c = cand(pid, mid, "ref")
+            if c:
+                return c, "ref", tried
+
+    if mv and "/" in mv and ml:
+        k = mv.index("/")
+        pid = mv[:k]
+        for mid in models_of(pid):
+            if any(str(x).strip().lower() == ml for x in (mid, pid + "/" + mid)):
+                cc = cand(pid, mid, "ref-label")
+                if cc:
+                    return cc, "ref-label", tried
 
     if ml:
-        for pid, pp in prov.items():
-            if not isinstance(pp, dict) or str(pid).startswith("builtin:"):
-                continue
-            for mid in (pp.get("models") or {}):
-                mm = (pp.get("models") or {}).get(mid) or {}
-                for cand in (mid, mm.get("name"), pid + "/" + mid):
-                    if cand and str(cand).strip().lower() == ml:
-                        return {"pid": pid, "mid": mid, "p": pp}, "label"
+        for c in cands:
+            for mid in c["models"]:
+                if any(str(x).strip().lower() == ml for x in (mid, c["pid"] + "/" + mid)):
+                    cc = cand(c["pid"], mid, "label")
+                    if cc:
+                        return cc, "label", tried
 
-    for pid, pp in prov.items():
-        if not isinstance(pp, dict) or str(pid).startswith("builtin:"):
+    ordered = sorted(cands, key=lambda c: 1 if c["pid"].startswith(("builtin:", "account:")) else 0)
+    for c in ordered:
+        if not c["models"]:
             continue
-        models = pp.get("models") or {}
-        mid = next(iter(models), None)
-        if mid and (pp.get("options") or {}).get("baseURL"):
-            return {"pid": pid, "mid": mid, "p": pp}, "fallback"
-    return None, "none"
+        cc = cand(c["pid"], c["models"][0], "fallback")
+        if cc:
+            return cc, "fallback", tried
+    return None, "none", tried
 
 
-def build_request(pick: dict) -> tuple[list[str], dict, str]:
-    """复刻 handler 的 URL / 请求体构造。返回 (候选URL列表, headers, 错误说明)。"""
-    p = pick["p"] or {}
-    opts = p.get("options") or {}
-    u = str(opts.get("baseURL") or "").rstrip("/")
-    k = str(opts.get("apiKey") or "")
-    kind = str(p.get("kind") or "openai-compatible")
-    if not u:
-        return [], {}, f'供应商「{pick["pid"]}」没有填 Base URL'
-    if not k:
-        return [], {}, f'供应商「{pick["pid"]}」没有填 API Key'
-
-    headers = {"Content-Type": "application/json", "Accept": "application/json",
-               "Authorization": "Bearer " + k, "x-api-key": k}
-    if kind == "anthropic":
+def probe(c: dict, mid: str) -> str:
+    u = c["baseURL"].rstrip("/")
+    k = c["apiKey"]
+    if c["kind"] == "anthropic":
         urls = [(u if u.endswith("/v1") else u + "/v1") + "/messages"]
-    else:
-        urls = [(u if u.endswith("/v1") else u + "/v1") + "/chat/completions",
-                u + "/chat/completions"]
-    return urls, headers, ""
-
-
-def probe(pick: dict, urls: list[str], headers: dict) -> str:
-    """真实打一发最小请求。返回人类可读结论。"""
-    p = pick["p"] or {}
-    kind = str(p.get("kind") or "openai-compatible")
-    mid = pick["mid"]
-    if kind == "anthropic":
         body = {"model": mid, "max_tokens": 32, "system": "ping",
                 "messages": [{"role": "user", "content": "ping"}]}
     else:
+        urls = [(u if u.endswith("/v1") else u + "/v1") + "/chat/completions",
+                u + "/chat/completions"]
         body = {"model": mid, "stream": False, "max_tokens": 32,
                 "messages": [{"role": "user", "content": "ping"}]}
+    headers = {"Content-Type": "application/json", "Accept": "application/json",
+               "Authorization": "Bearer " + k, "x-api-key": k}
     payload = json.dumps(body).encode()
     last = "未能连通"
     for url in urls:
-        hdrs = dict(headers)
-        hdrs["Content-Length"] = str(len(payload))
-        req = urllib.request.Request(url, data=payload, method="POST", headers=hdrs)
+        h = dict(headers)
+        h["Content-Length"] = str(len(payload))
+        req = urllib.request.Request(url, data=payload, method="POST", headers=h)
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT // 1000) as r:
                 return f"{OK} {url} -> HTTP {r.status}，端到端可用"
@@ -158,10 +271,9 @@ def probe(pick: dict, urls: list[str], headers: dict) -> str:
                 msg = (j.get("error") or {}).get("message") or j.get("message") or raw
             except Exception:
                 pass
-            verdict = diagnose_http(e.code, str(msg))
-            line = f"{BAD} {url} -> HTTP {e.code}：{msg}\n       归因：{verdict}"
+            line = f"{BAD} {url} -> HTTP {e.code}：{msg}\n       归因：{diagnose_http(e.code, str(msg))}"
             if e.code == 400:
-                return line                     # 400 换地址也没用，直接给结论
+                return line
             last = line
             continue
         except Exception as e:
@@ -173,11 +285,11 @@ def probe(pick: dict, urls: list[str], headers: dict) -> str:
 def diagnose_http(code: int, msg: str) -> str:
     m = msg.lower()
     if code == 400:
-        if "model is unavailable" in m or "model_not_found" in m or "not available" in m:
+        if any(s in m for s in ("model is unavailable", "model_not_found", "not available")):
             return ("★ 模型不被该供应商接受：模型名写了，但这个 key/套餐里没有它。"
-                    "检查 config.json 里模型 id 的拼写与大小写（glm-5.2 != GLM-5.2）")
-        if "invalid_request" in m or "invalid" in m:
-            return "请求体字段不被接受（max_tokens 超上限 / 参数名不符）——多为 non-anthropic 端点套用了 anthropic 路径"
+                    "检查模型 id 的拼写与大小写（glm-5.2 != GLM-5.2）")
+        if "invalid" in m:
+            return "请求体字段不被接受（max_tokens 超上限 / 参数名不符）"
         return "上游判定请求非法：核对 model id、max_tokens、endpoint 路径前缀"
     if code == 401:
         return "★ 鉴权失败：API Key 过期/错填/不属于该 endpoint"
@@ -194,8 +306,6 @@ def diagnose_http(code: int, msg: str) -> str:
     return "未知错误码"
 
 
-# ------------------------------------------------------------------ main
-
 def main() -> int:
     safe_stdio()
     ap = argparse.ArgumentParser(description="增强提示词（润色）链路诊断（只读）")
@@ -206,141 +316,122 @@ def main() -> int:
     ap.add_argument("--model-value", default="",
                     help="模拟界面给的 data-model-current-value（providerId/modelId）")
     ap.add_argument("--model-label", default="",
-                    help="模拟界面显示的模型名（ref 解析失败时的第二档）")
+                    help="模拟界面显示的模型名（ref 解析失败时的后备）")
     args = ap.parse_args()
 
-    report: dict = {}
-    problems: list[str] = []
-
     root, how = resolve_root()
-    report["config_root"] = str(root)
-    report["config_root_how"] = how
-    if not args.json:
-        print("增强提示词（润色按钮）链路诊断 —— 只读")
-        print("=" * 68)
-        print(f"1. 数据根  {root}")
-        print(f"   {how}")
+    cands, by_id, notes, extra = build_candidates(root)
+    problems: list[str] = []
+    report: dict = {"config_root": str(root), "root_how": how,
+                    "candidate_count": len(cands),
+                    "sources": extra["stats"],
+                    "cross_config_diffs": extra["audit"]}
 
-    cfg_path = root / "config.json"
-    if not cfg_path.is_file():
-        problems.append(f"找不到 {cfg_path}")
+    def say(*a):
+        """人读模式下才打印——--json 时保持 stdout 只剩 JSON。"""
         if not args.json:
-            print(f"{BAD} 2. 找不到 {cfg_path} —— 客户端从未配置过供应商")
-        if args.json:
-            print(json.dumps({"report": report, "problems": problems},
-                             ensure_ascii=False, indent=2))
-        return 1
-    try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        problems.append(f"config.json 解析失败：{e!r}")
-        if args.json:
-            print(json.dumps({"report": report, "problems": problems},
-                             ensure_ascii=False, indent=2))
-        else:
-            print(f"{BAD} 2. config.json 解析失败：{e!r}")
-        return 1
+            print(*a)
 
-    prov = cfg.get("provider") or {}
-    custom = {k: v for k, v in prov.items()
-              if isinstance(v, dict) and not str(k).startswith("builtin:")}
-    report["providers_total"] = len(prov)
-    report["providers_custom"] = list(custom)
-    if not args.json:
-        print(f"{OK} 2. config.json 可解析：{len(prov)} 个供应商"
-              f"（其中自定义 {len(custom)} 个 —— 只有自定义的会被三档解析选中）")
+    say("增强提示词（润色按钮）链路诊断 —— 只读")
+    say("=" * 68)
+    say(f"1. 数据根  {root}")
+    say(f"   {how}")
+    st = extra["stats"]
+    pc_n = st.get("provider_config.json")
+    cj_n = st.get("config.json")
+    say(f"{OK if pc_n else BAD} 2. provider_config.json（权威）: "
+        f"{pc_n if pc_n is not None else '读不到'} 个供应商")
+    say(f"   config.json（旧格式，仅补缺）: {cj_n if cj_n is not None else '读不到'} 个")
+    for n in notes:
+        say("   " + n)
+    if pc_n is None:
+        problems.append("读不到 provider_config.json —— 客户端发请求用的就是它，"
+                        "拿不到就无法保证用对了供应商")
 
-    # ---- 3. 模型解析 ----
-    mv = args.model_value.strip()
-    ml = args.model_label.strip()
-    pick, how_used = resolve_model(cfg, mv, ml)
+    if extra["audit"]:
+        say(f"{WARN} 2b. 两份配置不一致的供应商（provider_config.json 才是生效的）：")
+        for pid, diffs in extra["audit"].items():
+            say(f"   - {pid}")
+            for d in diffs:
+                say(f"       {d}")
+
+    say("3. 模型解析（复刻 handler 四档）")
+    mv, ml = args.model_value.strip(), args.model_label.strip()
+    if mv:
+        say(f"   界面 ref = {mv!r} / 显示名 = {ml!r}")
+    else:
+        say("   （未提供 --model-value，演示最坏情况：界面 ref 读不到）"
+            f" 显示名 = {ml or '(空)'!r}")
+    pick, how_used, tried = resolve(cands, by_id, mv, ml)
     report["resolve"] = {"modelValue": mv, "modelLabel": ml, "how": how_used,
                          "providerId": pick and pick["pid"],
-                         "modelId": pick and pick["mid"]}
-    if not args.json:
-        print("3. 模型解析（复刻 handler 三档）")
-        if mv:
-            print(f"   界面 ref = {mv!r} / 显示名 = {ml!r}")
-        else:
-            print(f"   （未提供 --model-value，演示最坏情况：界面 ref 读不到）"
-                  f" 显示名 = {ml or '(空)'!r}")
-        if not pick:
-            problems.append("没有解析出任何模型 -> 润色直接报「没有可用的模型」")
-            print(f"{BAD}   解析结果：无 —— 界面没给 ref，且显示名反查不到")
-            print("         → 修复：确认供应商配置里 models 键的拼写与界面显示名一致")
-        else:
-            tag = {"ref": OK, "label": WARN, "fallback": BAD}.get(how_used, WARN)
-            print(f"{tag}   命中 {pick['pid']} / {pick['mid']}   (how={how_used})")
-            if how_used == "label":
-                print("         按显示名反查：ref 通道没取到值，说明界面 DOM 里"
-                      "没有 data-model-current-value 或取值失败")
-            if how_used == "fallback":
-                print("         兜底档：把请求打给了「第一个带 Base URL 的自定义供应商」")
-                print("         ★ 这就是跨机差异的主因之一 —— 与你界面上选的模型无关")
+                         "modelId": pick and pick["mid"],
+                         "tried": tried[:6]}
+    if not pick:
+        problems.append("没有解析出任何模型 -> 润色直接报「没有可用的模型」")
+        say(f"{BAD}   解析结果：无")
+    else:
+        tag = OK if how_used == "ref" else WARN
+        if how_used == "fallback":
+            tag = BAD
+        say(f"{tag}   命中 {pick['pid']} / {pick['mid']}   (how={how_used})")
+        say(f"         来源: {pick['c']['source']}  名称: {pick['c']['name'] or '-'}")
+        if how_used == "fallback":
+            say("         兜底档：把请求打给了「第一个可用的自定义供应商」")
+            say("         ★ 跨机差异的主因 —— 与你界面上选的模型无关")
+        if how_used == "label":
+            say("         按显示名反查：ref 通道没取到值"
+                "（界面 DOM 里没有 data-model-current-value 或取值失败）")
 
-    # ---- 4. 关键字段 ----
+    urls = []
     if pick:
-        p = pick["p"]
-        opts = p.get("options") or {}
-        info = {
-            "name": p.get("name"),
-            "kind": p.get("kind"),
-            "baseURL": opts.get("baseURL"),
-            "apiKey_present": bool(opts.get("apiKey")),
-            "apiKey_len": len(str(opts.get("apiKey") or "")),
-            "enabled": p.get("enabled"),
-            "systemDisabledReason": p.get("systemDisabledReason"),
-            "model_in_config": pick["mid"] in (p.get("models") or {}),
-        }
+        c = pick["c"]
+        info = {"source": c["source"], "name": c["name"], "kind": c["kind"],
+                "baseURL": c["baseURL"], "apiKey_len": len(c["apiKey"]),
+                "systemDisabledReason": c["systemDisabledReason"],
+                "model_in_config": pick["mid"] in c["models"],
+                "models": c["models"][:8]}
         report["provider"] = info
-        if not args.json:
-            print("4. 命中供应商的关键字段")
-            for k, v in info.items():
-                print(f"   {k:24} = {v}")
-        if info["kind"] == "anthropic" and str(pick["pid"]).startswith("builtin:"):
-            print(f"{BAD}   ★ kind=anthropic 且 providerId 以 builtin: 开头 —— "
-                  f"这是**客户端内置供应商**，key 通常由宿主注入，"
-                  f"插件手工读取的 apiKey 可能是旧值/空值")
+        say("4. 命中供应商的关键字段")
+        for k, v in info.items():
+            say(f"   {k:24} = {v}")
         if info["systemDisabledReason"]:
             problems.append(f"命中供应商被系统禁用：{info['systemDisabledReason']}")
-            print(f"{BAD}   ★ systemDisabledReason={info['systemDisabledReason']} "
-                  f"—— 套餐未生效/未授权，模型服务端会直接判不可用")
-        if info["enabled"] is False and not info["systemDisabledReason"]:
-            print(f"{WARN}   enabled=false 但无禁用原因（内置 provider 常如此）")
+            say(f"{BAD}   ★ 套餐未生效/未授权，服务端会直接判不可用")
 
-    # ---- 5. 请求构造 ----
-    urls, headers, err = build_request(pick) if pick else ([], {}, "")
-    if pick:
-        report["request"] = {"urls": urls, "max_tokens": MAX_TOKENS}
-        if not args.json:
-            print("5. 请求构造复核")
-        if err:
-            problems.append(err)
-            print(f"{BAD}   {err}")
+        u = c["baseURL"].rstrip("/")
+        k = c["apiKey"]
+        say("5. 请求构造复核")
+        if not u:
+            problems.append(f"供应商「{pick['pid']}」没有 baseURL")
+            say(f"{BAD}   没有 baseURL")
+        elif not k:
+            problems.append(f"供应商「{pick['pid']}」没有 apiKey")
+            say(f"{BAD}   没有 apiKey")
         else:
-            for i, u in enumerate(urls):
-                print(f"   {'  首次 ' if i == 0 else '  备选 '}POST {u}")
-            print(f"   headers: Content-Type / Accept / Authorization / x-api-key"
-                  f"（key 长度 {len(headers['Authorization']) - 7}）")
-            print(f"   max_tokens={MAX_TOKENS}（部分供应商 output 上限 <2048 会返回 400）")
-            if pick["p"].get("kind") == "anthropic" and "chat/completions" in urls[0]:
-                problems.append("anthropic 供应商却拼出了 chat/completions 路径")
-                print(f"{BAD}   kind 与路径不匹配")
+            if c["kind"] == "anthropic":
+                urls = [(u if u.endswith("/v1") else u + "/v1") + "/messages"]
+            else:
+                urls = [(u if u.endswith("/v1") else u + "/v1") + "/chat/completions",
+                        u + "/chat/completions"]
+            for i, x in enumerate(urls):
+                say(f"   {'  首次 ' if i == 0 else '  备选 '}POST {x}")
+            say(f"   kind={c['kind']}  max_tokens={MAX_TOKENS}"
+                "（部分供应商 output 上限 <2048 会返回 400）")
+            report["request"] = {"urls": urls, "max_tokens": MAX_TOKENS}
 
-    # ---- 6. 探测 ----
-    if args.probe and pick and not err:
+    if args.probe and pick and urls:
         if args.only and args.only != pick["pid"]:
-            print(f"   （--only {args.only} 与命中供应商不符，跳过探测）")
+            say(f"   （--only {args.only} 与命中供应商不符，跳过探测）")
         else:
-            print("6. 真实连通性探测")
-            res = probe(pick, urls, headers)
+            say("6. 真实连通性探测")
+            res = probe(pick["c"], pick["mid"])
             report["probe"] = res
             for ln in res.splitlines():
-                print("   " + ln)
+                say("   " + ln)
             if BAD in res:
                 problems.append("探测失败：" + res.splitlines()[0])
 
-    # ---- 结论 ----
     report["problems"] = problems
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -349,20 +440,11 @@ def main() -> int:
     print("=" * 68)
     if not problems:
         print(f"{OK} 结论：配置侧没发现阻断项。")
-        print("   若别人机器上仍报 400 Model is unavailable，请在那台机器上：")
-        print("   a) 运行本脚本（同一份文件，直接拷过去即可）对比输出；")
-        print("   b) 在本脚本 --probe 之外，用界面里**真正选中的那个模型**再试一次润色；")
-        print("   c) 抓包看请求体里的 model 字段究竟发了什么。")
+        print("   若仍不正常，请确认界面选中的模型与解析结果一致（看第 3 节 how= 是否为 ref）")
         return 0
     print(f"{BAD} 结论：发现 {len(problems)} 个会导致润色失败的问题：")
     for i, s in enumerate(problems, 1):
         print(f"   {i}) {s}")
-    print()
-    print("修复优先级：")
-    print("   ① 让「界面选中的模型」与「插件解析到的模型」一致（消除兜底档）")
-    print("      → 插件侧已加固：先按 ref、再按显示名，且不接收被禁用的内置供应商")
-    print("   ② 补齐/更新该供应商的 API Key，确认套餐与模型权限")
-    print("   ③ 核对 baseURL 是否带 /v1，kind 是否与端点协议匹配")
     return 1
 
 

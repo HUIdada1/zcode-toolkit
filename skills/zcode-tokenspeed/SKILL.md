@@ -683,19 +683,46 @@ python zcode_patcher.py --enhance-prompt --revert
 ```
 
 链路：渲染层按钮 → preload 桥 `window.zcode.enhancePrompt(text, modelValue, modelLabel)`
-→ main handler `zcode:enhance-prompt`（`_ENHANCE_HANDLER`）读 `config.json` 解析供应商 → 直接 POST 补全接口。
+→ main handler `zcode:enhance-prompt`（`_ENHANCE_HANDLER`）读**供应商配置**解析 → 直接 POST 补全接口。
 
-### ★ 已知坑：请求打到不相干的供应商上（0.5.9 修复）
+### ★★ 关键前提：客户端发请求用的是 `provider_config.json`，不是 `config.json`（0.5.10 修复）
+
+**两份配置文件并存、语义不同**（同一个数据根下）：
+
+| 文件 | 角色 | 说明 |
+|---|---|---|
+| `~/.zcode/v2/provider_config.json` | **权威源** | 客户端真正据此构造请求。结构：`providerConfigRules.providerRules[]`（`providerId` / `providerName` / `config.access.apiKey` / `config.api.baseUrl` / `config.api.type` / `config.personalModelIds`）+ `modelConfigRules.providerModelRules[]` |
+| `~/.zcode/v2/config.json` | **遗留副本** | 旧格式（`provider.options.baseURL/apiKey/models`）。可能滞后：供应商缺失、apiKey 过期、模型列表旧 |
+
+客户端 bundle 里的硬证据：`ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` 环境变量、
+常量 `MXe="provider_config.json"`、以及
+`a=e.personalProviderConfigPath??e.env[tte]?.trim()??join(dirname(credentialStore.filePath),MXe)`。
+即**默认就是读 `provider_config.json`**。
+
+> 本机实测两份不一致：`config.json` 里某供应商只有 `['glm-5.2']` 且 apiKey 是旧的，
+> `provider_config.json` 里有 8 个模型（含 `glm-5.3`）且 apiKey 不同；
+> 另有供应商（如 `openai`、`590ce4cc-…`）**只存在于 `provider_config.json`**。
+
+**0.5.9 的残留缺陷**：0.5.9 修好了「兜底档无视界面选择」，但 handler 仍只读 `config.json`。
+于是当界面选中的是只在 `provider_config.json` 里存在的供应商/模型时，
+ref 档必然查不到 → 掉进兜底档 → 打到别的供应商 → `HTTP 400 Model is unavailable`。
+
+**修复（0.5.10）**：handler 改为 **`provider_config.json` 优先、`config.json` 仅补缺**，
+把两份归一化成统一候选表（去重，保留权威源同名条目），再走四档解析。
+这样「界面选中的 provider/model」与「handler 读到的」来自**同一个文件**，从根上对齐。
+
+### ★ 已知坑：请求打到不相干的供应商上（0.5.9 起修复）
 
 **症状**：本机润色正常，别的电脑报
 `HTTP 400：Upstream request failed: Model is unavailable.`，或部分机器显示
 「已用 glm-5.2 增强」却成功。
 
-**根因**：模型解析的兜底档**无视界面选择**——只要 ref / label 两档没命中，
-就把请求发给「第一个带 baseURL 的自定义供应商的首个模型」，且**不校验该供应商是否可用**
-（`apiKey` 为空、`systemDisabledReason` 存在都照样发）。
-不同机器 `provider` 的**插入顺序不同** → 兜底落到不同供应商 → 有的机器撞对了就能用，
-撞到未授权/无 key 的供应商就返回上游的 `Model is unavailable`。
+**根因（两层）**：
+1. **0.5.9 之前**：模型解析的兜底档**无视界面选择**——只要 ref / label 两档没命中，
+   就把请求发给「第一个带 baseURL 的自定义供应商的首个模型」，且**不校验该供应商是否可用**
+   （`apiKey` 为空、`systemDisabledReason` 存在都照样发）。
+   不同机器 `provider` 的**插入顺序不同** → 兜底落到不同供应商 → 有的机器撞对了就能用。
+2. **0.5.10 之前**：读错了配置文件（见上一节），界面所选模型在旧副本里根本查不到。
 
 **为什么本机能用纯属巧合**：本机 `provider` 里前面几条是 `builtin:*`（被旧逻辑跳过），
 兜底恰好落到一个有效供应商上。
@@ -703,6 +730,17 @@ python zcode_patcher.py --enhance-prompt --revert
 **修复（0.5.9）**：四档解析全部经 `usable(pp)` 判定（`baseURL` + `apiKey` + 无
 `systemDisabledReason`）；新增 `ref-label` 档；`label` 档放开 `builtin:` 限制；
 兜底只选真正可用的。拿不出可用候选时返回 `code:"no-model"` + 可读原因，不再构造注定失败的请求。
+**修复（0.5.10）**：权威源改为 `provider_config.json`；兜底候选排序时把
+`builtin:` / `account:` 前缀的供应商**排到最后**（用户自定义供应商优先）。
+
+### 四档解析顺序
+
+1. **ref** — 界面 `data-model-current-value` 的 `${providerId}/${modelId}` 精确命中
+2. **ref-label** — ref 的 provider 段命中，但模型改用界面显示名匹配
+3. **label** — 全部候选里按显示名匹配
+4. **fallback** — 排序后的第一个可用候选（内置/账号级排最后）
+
+自诊断里 `how=ref` 才表示「正确用上了你在下拉菜单里选的模型」；其余档位都值得怀疑。
 
 ### 错误归因与重试（0.5.9）
 
@@ -721,13 +759,21 @@ python zcode_patcher.py --enhance-prompt --revert
 
 ```bash
 python "<skill目录>/scripts/enhance_doctor.py"                 # 解析链路体检
+python enhance_doctor.py --json                                # 机器可读（含 resolve/provider/request/problems）
 python enhance_doctor.py --probe                               # 加真实连通性探测（耗极少额度）
 python enhance_doctor.py --probe --model-value "builtin:zai-coding-plan/GLM-5.2"
 ```
 
-**它逐段复刻 handler 的解析逻辑**，所以「脚本判定用哪个供应商」= 「按钮实际会用哪个」。
-输出含解析路径（`ref`/`label`/`fallback`）、关键字段、请求 URL / `max_tokens`、HTTP 归因。
+**它逐段复刻 handler 的解析逻辑**（同一套「provider_config.json 优先 + 四档」），
+所以「脚本判定用哪个供应商」= 「按钮实际会用哪个」。支持
+`--model-value`（界面 ref，形如 `providerId/modelId`）/ `--model-label`（界面显示名）
+模拟界面选择；不给就演示最坏情况。
+输出含解析路径（`ref`/`ref-label`/`label`/`fallback`）、关键字段、请求 URL / `max_tokens`、
+**两份配置的差异审计**（`2b` 节，列出只存在于权威源/旧副本的供应商与字段差异）。
 退出码 0 = 无阻断，1 = 发现会导致失败的问题。
+
+> **判读要点**：只有 `how=ref` 才代表「用上了你在下拉菜单里选的模型」。
+> `fallback` = 打到了别的供应商（正是跨机差异的症状）。
 
 界面侧自诊断：DevTools（`Ctrl+Shift+I`）里看 `window.__zenhanceDiag`——
 `lastRequest.modelValue`（空 = ref 通道失效）、`modelCandidates`（>1 = 页面有多个模型节点）、
@@ -737,7 +783,8 @@ python enhance_doctor.py --probe --model-value "builtin:zai-coding-plan/GLM-5.2"
 
 | 现象 | 处理 |
 |---|---|
-| 报 `Model is unavailable` | ★ 解析落到了错误供应商。跑 `enhance_doctor.py` 看 `how=`；应急办法：设置里删掉/补全那些 `builtin:` 未生效供应商 |
+| 报 `Model is unavailable` | ★ 解析没命中界面所选模型。跑 `enhance_doctor.py --model-value "<providerId>/<modelId>"` 看 `how=`；`ref` 之外都要查：① 选中供应商是否只在 `provider_config.json` 里（旧版 handler 读的是 `config.json`，见上文 0.5.10）；② 该供应商是否被 `systemDisabledReason` 禁用 |
+| 升级到 0.5.10 后仍报错 | 确认**注入**也升到了 0.5.10：`--enhance-prompt --dry-run` 看是否有「将热更新…（X → Y 字节）」。`--check` 只看挂载标记，不比对脚本内容 |
 | 报「通信桥不可用」 | preload 桥缺失；重跑 `--enhance-prompt` 注入后**重启** ZCode |
 | 按钮不出现 | `window.__zenhanceDiag.hiddenReason`；找不到输入框 / 找不到工具栏行 |
 | 报 `no-model` | 没有可用候选（全表缺 key/baseURL 或被禁用），按提示补配置 |

@@ -334,10 +334,16 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --revert
 `HTTP 400：Upstream request failed: Model is unavailable.`，
 （或反过来，有的机器显示「已用 glm-5.2 增强」并成功）。
 
-**原因**：插件在「界面所选模型 → 配置里的供应商」这一步反查失败时，
-旧版会退化成「拿第一个供应商去试」——**跟你界面上选了什么无关**。
-不同电脑供应商的排列顺序不同，于是有的机器恰好撞对就能用，撞到没配好
-（缺 API Key、或套餐未生效）的供应商就报这个错。
+**原因（两层）**：
+
+1. 插件在「界面所选模型 → 配置里的供应商」这一步反查失败时，
+   旧版会退化成「拿第一个供应商去试」——**跟你界面上选了什么无关**。
+   不同电脑供应商的排列顺序不同，于是有的机器恰好撞对就能用，撞到没配好
+   （缺 API Key、或套餐未生效）的供应商就报这个错。
+2. 更关键的是：客户端真正用来发请求的配置是 **`provider_config.json`**，
+   而旧版插件读的是另一个遗留文件 **`config.json`**。后者可能滞后
+   （供应商缺失、API Key 过期、模型列表旧），于是**你在下拉菜单里选的模型
+   在插件眼里根本不存在**，必然掉进上面的退化路径。
 
 > 这句话来自上游网关的**模型维度**判定（模型不在你的套餐内 / 已下线），
 > **与地区限制、代理无关** —— 地域封锁表现为 403 或连接重置。
@@ -347,13 +353,17 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --revert
 1. **先诊断**（只读，不消耗额度）：
 
    ```bash
-   python skills/zcode-tokenspeed/scripts/enhance_doctor.py
+   python skills/zcode-tokenspeed/scripts/enhance_doctor.py --model-value "<providerId>/<modelId>"
    ```
 
+   `<providerId>/<modelId>` 就是界面选择的标识（形如 `openai/GLM-5.3`），
+   可从 DevTools 里 `window.__zenhanceDiag.lastRequest.modelValue` 抄到，或不带参数跑。
    看第 3 节的 `how=`：
-   - `ref` = 正常，界面模型被准确识别；
+   - `ref` = 正常，界面模型被准确识别（**这才是期望结果**）；
    - `label` = 退而用显示名反查（能用，但说明界面没给出模型标识）；
    - `fallback` = **踩坑了**，请求被发给了一个并非你选中的供应商。
+
+   第 `2b` 节会列出两份配置的差异（哪些供应商/模型只在权威源里），这是判定的关键。
 
 2. **加一发真实探测**确认端到端可用（会消耗极少量额度）：
 
@@ -365,8 +375,13 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --revert
    把那些 **`apiKey` 为空或套餐未生效的内置供应商**（名字里带 Coding Plan 之类）
    删掉或补全 Key，让列表里只剩真正能用的供应商。
 
-升级到 **0.5.9+** 后该问题已在客户端侧修掉：解析只会选**真正可用**的供应商，
-失败时给出「该换什么」的建议，并且对限流 / 超时 / 供应商故障做自动退避重试。
+升级到 **0.5.10+** 后该问题已在客户端侧从根上修掉：插件改读**与客户端同一个**
+`provider_config.json`，确保「你选的」和「它用的」是同一个供应商与模型；
+解析只会选**真正可用**的供应商，失败时给出「该换什么」的建议，
+并且对限流 / 超时 / 供应商故障做自动退避重试。
+
+> ⚠️ 升级后请用 `--enhance-prompt --dry-run` 确认注入内容也换成了新版
+> （`--check` 只检测挂载标记，不比对脚本内容）。
 
 > 其他增强提示词的报错：`no-model` = 没有可用候选（按提示补配置）；
 > `no-key` / `no-baseurl` = 命中供应商缺凭据；报「通信桥不可用」= 重跑注入并重启 ZCode。

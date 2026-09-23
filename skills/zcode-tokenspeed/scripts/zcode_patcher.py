@@ -1424,65 +1424,114 @@ let base=i.homedir();
 try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
 if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
 let root=r.join(base,".zcode","v2");
-let cfg={provider:{}};
-try{let d=JSON.parse(n.readFileSync(r.join(root,"config.json"),"utf-8"));
-if(d&&typeof d=="object"&&!Array.isArray(d))cfg=d}catch(_){}
+// ============================================================
+// 供应商凭据的唯一权威来源是 provider_config.json（客户端自己就是从这里发请求的）。
+// config.json 里的 provider.options 是**旧格式**：官方设置页现在写 provider_config.json，
+// config.json 可能停在很久以前（本机实测：key 不同、模型列表不同、端点数不同）。
+// 旧实现只读 config.json → 界面选的模型在那里可能压根不存在 → 解析失败 → 400。
+// 因此这里先把 provider_config.json 归一化成统一的候选表，必要时再用 config.json 补缺。
+// ============================================================
+function rd(p){try{return JSON.parse(n.readFileSync(p,"utf-8"))}catch(_){return null}}
+let srcTried=[];
+// ① provider_config.json（权威）→ 归一化
+let pcCands=[];
+try{
+let p=d=>d&&d.config?d.config:d;
+let pc=p(rd(r.join(root,"provider_config.json")));
+if(pc){
+let rules=((pc.providerConfigRules||{}).providerRules)||[];
+// api.type → 本 handler 使用的 kind
+function zkind(t){
+t=String(t||"").toLowerCase();
+if(t.indexOf("anthropic")>=0)return"anthropic";
+if(t.indexOf("openai")>=0||t.indexOf("chat-completions")>=0||t.indexOf("responses")>=0)return"openai-compatible";
+return"openai-compatible"}
+let pm={};
+for(let r2 of ((pc.modelConfigRules||{}).providerModelRules)||[]){
+let pid2=String(r2.providerId||"");if(!pid2)continue;
+(pm[pid2]=pm[pid2]||[]).push(String(r2.modelId||""))}
+for(let r2 of rules){
+let pid2=String(r2.providerId||"");if(!pid2)continue;
+let c=r2.config||{},acc=c.access||{},api=c.api||{};
+let ids=[].concat(c.personalModelIds||[],pm[pid2]||[]),models={};
+for(let id of ids){let s2=String(id||"").trim();if(s2&&!models[s2])models[s2]={name:s2}}
+pcCands.push({pid:pid2,p:{name:r2.providerName,kind:zkind(api.type),models:models,
+options:{baseURL:String(api.baseUrl||""),apiKey:String(acc.apiKey||"")}},name:String(r2.providerName||"")})}
+srcTried.push("provider_config.json:"+pcCands.length)}}catch(_){srcTried.push("provider_config.json:err")}
+// ② config.json 的 provider（旧格式）→ 归一化成同一形状；已被 ① 覆盖的 providerId 跳过
+let cfgCands=[];
+try{let d=rd(r.join(root,"config.json"));
+for(let ent of Object.entries((d&&d.provider)||{})){
+let pid2=ent[0],pp=ent[1];
+if(!pp||typeof pp!="object")continue;
+cfgCands.push({pid:pid2,p:pp,name:String(pp.name||"")})}
+srcTried.push("config.json:"+cfgCands.length)}catch(_){srcTried.push("config.json:err")}
+// 合并：① 优先，缺失的用 ②（config.json 的 options.baseURL/apiKey 是显式的，作为回退）
+let seen={};
+for(let c of pcCands)seen[c.pid]=1;
+let all=pcCands.slice();
+for(let c of cfgCands){if(seen[c.pid])continue;all.push(c);seen[c.pid]=1}
+let byId={};for(let c of all)byId[c.pid]=c;
 let text=String((t&&t.text)||"").trim();
 if(!text)return{success:!1,code:"empty",error:"输入框是空的"};
-let prov=cfg.provider||{};
 let mv=String((t&&t.modelValue)||"").trim();
 let ml=String((t&&t.modelLabel)||"").trim().toLowerCase();
 let pick=null,how="",tried=[];
-// 候选必须「自带 key + 自带 baseURL + 未被系统禁用」——否则必然是 400/401
+// 候选必须「有 baseURL + 有 apiKey」——否则必然是 400/401
 function usable(pp){
 if(!pp||typeof pp!="object")return!1;
 if(pp.systemDisabledReason)return!1;
 let o=pp.options||{};
 return !!String(o.baseURL||"").trim()&&!!String(o.apiKey||"").trim()}
-function cand(pid,mid,pp,n){
-let u=String((pp.options||{}).baseURL||"").replace(/\\/+$/,"");
-tried.push(n+":"+pid+"/"+mid+(usable(pp)?"":"(跳过:不可用)"));
-if(!usable(pp))return null;
-return{pid:pid,mid:mid,p:pp,how:n}}
+function baseOf(pid){let c=byId[pid];return c?String(((c.p||{}).options||{}).baseURL||"").replace(/\\/+$/,""):""}
+function modelsOf(pid){let c=byId[pid];return c?((c.p||{}).models||{}):{}}
+function cand(pid,mid,n){
+tried.push(n+":"+pid+"/"+mid+(usable((byId[pid]||{}).p)?"":"(跳过:不可用)"));
+if(!byId[pid]||!usable(byId[pid].p))return null;
+return{pid:pid,mid:mid,p:byId[pid].p,how:n,name:(byId[pid].name||"")}}
 // ① 界面直接给的 ref（providerId/modelId）——最准
 if(mv){let k=mv.indexOf("/");
-if(k>0){let pid=mv.slice(0,k),mid=mv.slice(k+1),pp=prov[pid];
-if(pp&&pp.models&&pp.models[mid]){let c=cand(pid,mid,pp,"ref");if(c)pick=c}}}
+if(k>0){let pid=mv.slice(0,k),mid=mv.slice(k+1);
+if(modelsOf(pid)[mid]){let c=cand(pid,mid,"ref");if(c)pick=c}}}
 // ② 按 ref 的 providerId + 界面显示名，在该供应商内部定位模型
 //    （ref 里的 modelId 与配置键不一致时，这一档能救回来）
 if(!pick&&mv&&ml){let k=mv.indexOf("/");
-if(k>0){let pid=mv.slice(0,k),pp=prov[pid];
-if(pp&&pp.models){for(let mid of Object.keys(pp.models||{})){
-let mm=pp.models[mid]||{};
+if(k>0){let pid=mv.slice(0,k);
+for(let mid of Object.keys(modelsOf(pid))){
+let mm=modelsOf(pid)[mid]||{};
 let names=[mid,mm.name,pid+"/"+mid];
 for(let c2 of names){
-if(c2&&String(c2).trim().toLowerCase()===ml){let c=cand(pid,mid,pp,"ref-label");if(c)pick=c;break}}
-if(pick)break}}}}
+if(c2&&String(c2).trim().toLowerCase()===ml){let c=cand(pid,mid,"ref-label");if(c)pick=c;break}}
+if(pick)break}}}
+
 // ③ 全表按显示名反查（不限自定义：内置供应商只要能读到 key 也应该能用）
 if(!pick&&ml){
-for(let ent of Object.entries(prov)){
-let pid=ent[0],pp=ent[1];
+for(let c of all){
+let pid=c.pid,pp=c.p;
 if(!pp||typeof pp!="object")continue;
 for(let mid of Object.keys(pp.models||{})){
 let mm=pp.models[mid]||{};
 let names=[mid,mm.name,pid+"/"+mid];
 for(let c3 of names){
-if(c3&&String(c3).trim().toLowerCase()===ml){let c=cand(pid,mid,pp,"label");if(c)pick=c;break}}
+if(c3&&String(c3).trim().toLowerCase()===ml){let cc=cand(pid,mid,"label");if(cc)pick=cc;break}}
 if(pick)break}
 if(pick)break}}
 // ④ 末档兜底：界面没给出任何可用线索时，才用第一个真正可用的供应商
+//    注意只在本轮**同一份候选表**里挑，且内置（builtin:/account:）供应商排在最后——
+//    它们要么没有 key，要么归属他人的套餐，优先选会再次踩到 400。
 if(!pick){
-for(let ent of Object.entries(prov)){
-let pid=ent[0],pp=ent[1];
-if(!pp||typeof pp!="object"||String(pid).startsWith("builtin:"))continue;
-let mid=Object.keys(pp.models||{})[0];
+let ordered=all.slice().sort(function(a,b){
+let za=/^(builtin:|account:)/.test(a.pid)?1:0,zb=/^(builtin:|account:)/.test(b.pid)?1:0;
+return za-zb});
+for(let c of ordered){
+let mid=Object.keys(c.p.models||{})[0];
 if(!mid)continue;
-let c=cand(pid,mid,pp,"fallback");if(c){pick=c;break}}}
+let cc=cand(c.pid,mid,"fallback");if(cc){pick=cc;break}}}
 if(!pick){
 let why=String((t&&t.modelValue)||"").trim()||ml;
 return{success:!1,code:"no-model",error:why
 ?("界面所选模型「"+why+"」不可用：它所属的供应商缺少 API Key / Base URL，或套餐未生效（"+(tried.slice(0,3).join("; ")||"无候选")+"）。请在设置里换一个已配置好的模型，或补全该供应商的凭据")
-:"没有可用的模型：请先在设置里配置供应商与 API Key"}}
+:("没有可用的模型：请先在设置里配置供应商与 API Key"),sources:srcTried}}
 let u=String(pick.p.options.baseURL||"").replace(/\\/+$/,"");
 let k=String(pick.p.options.apiKey||"");
 if(!u)return{success:!1,code:"no-baseurl",error:"供应商「"+pick.pid+"」没有填 Base URL"};

@@ -742,16 +742,40 @@ class TestGeneratedJs(unittest.TestCase):
         code = zp._enhance_main_block("j").decode()
         self.assertIn("function usable(", code, "必须存在可用性判定")
         self.assertIn("systemDisabledReason", code, "必须排除被系统禁用的供应商")
-        # 三档解析都必须走 cand()/usable()，不能有任何一条绕过判定直接 pick
-        self.assertIn('cand(pid,mid,pp,"ref")', code)
-        self.assertIn('cand(pid,mid,pp,"ref-label")', code)
-        self.assertIn('cand(pid,mid,pp,"label")', code)
-        self.assertIn('cand(pid,mid,pp,"fallback")', code)
+        # 四档解析都必须走 cand()/usable()，不能有任何一条绕过判定直接 pick
+        self.assertIn('cand(pid,mid,"ref")', code)
+        self.assertIn('cand(pid,mid,"ref-label")', code)
+        self.assertIn('cand(pid,mid,"label")', code)
+        self.assertIn('cand(c.pid,mid,"fallback")', code)
         self.assertNotIn('pick={pid:pid,mid:mid,p:pp};how="fallback"', code,
                          "兜底档不得绕过可用性判定")
         # 失败时必须给出原因与轨迹，前端才能做友好提示
         self.assertIn('code:"no-model"', code)
         self.assertIn("tried", code)
+
+    def test_enhance_reads_authoritative_provider_config(self):
+        """★ 回归：客户端真正发请求用的是 provider_config.json，不是 config.json。
+
+        config.json 是遗留副本，可能滞后（供应商缺失、apiKey 过期、模型列表旧）。
+        若只读 config.json，界面选中的 provider/model 可能根本查不到 →
+        掉进兜底档 → 打到别的供应商 → HTTP 400 Model is unavailable。
+        必须 provider_config.json 优先、config.json 兜底。
+        """
+        code = zp._enhance_main_block("j").decode()
+        # 权威源必须被读取，且顺序在 config.json 之前
+        self.assertIn('"provider_config.json"', code, "必须读取 provider_config.json")
+        i_auth = code.index('"provider_config.json"')
+        i_legacy = code.index('"config.json"')
+        self.assertLess(i_auth, i_legacy,
+                        "provider_config.json 必须在 config.json 之前读取（后者仅作兜底）")
+        # 两个配置文件都要解析出候选
+        for key in ("providerConfigRules", "providerRules", "personalModelIds", "modelConfigRules"):
+            self.assertIn(key, code, f"provider_config.json 解析缺少 {key}")
+        # 降级兜底必须把内置/账号级供应商排到最后（优先用户自定义供应商）
+        self.assertIn("builtin:", code)
+        self.assertIn("account:", code)
+        self.assertRegex(code, r"\.sort\(function\(a,b\)\{",
+                         "兜底候选需要排序，用户自定义供应商优先")
 
     def test_enhance_handler_classifies_errors_and_retries_only_retryable(self):
         """错误必须分类：model/auth/quota 不重试，超时/限流/5xx 才退避重试。"""
