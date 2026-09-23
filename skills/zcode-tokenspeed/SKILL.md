@@ -233,7 +233,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 | 思考等级透传（≤3.11） | 给自定义模型配思考等级 | `python zcode_patcher.py [--check/--revert/--extract]` | 内核 zcode.cjs（原地改写，.bak 备份） |
 | 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
 | 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：本轮指标 + 会话累计（第 N 轮/输入/命中+平均命中率/累出） | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
-| 思考强度滑条 | 工具栏「思考 · 档名」入口，点击弹出吸附拖拽条（动效）；原生下拉隐藏，拖完即时生效 | `python zcode_patcher.py --thought-slider [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| 思考强度滑条 | 工具栏「思考 · 档名」入口，点击弹出拖动条面板（dsh-reasoning-effort 同款：胶囊轨道 + canvas 像素辐射 + 白色旋钮，连续跟手、松手吸附）；原生下拉隐藏，拖完即时生效 | `python zcode_patcher.py --thought-slider [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py --model-width [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
 | **增强提示词** | 输入框旁一键用当前选中模型润色草稿（可恢复原文） | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
@@ -684,9 +684,9 @@ python scripts/model_pull.py --test https://api.example.com/v1 [KEY]
 | 想换注入脚本逻辑 | 改 `scripts/zcode-model-puller.js` 或改 preload/main 注入构造器后重跑 `--model-puller` 即可——**四组件（renderer/preload/main/index）均按内容比对**，只更新与现行实现不一致的组件，无需 revert；`--check` 会显示「含旧版组件，重跑可自动更新」 |
 | 保存后档位丢失 | 正常不会（整读整写不重建条目）；若用 ZCode 自带设置页保存过该 provider，属其重建路径剥掉 variants，重配 reasoning 即可 |
 
-## 六、思考强度滑条：点击弹出的吸附拖拽条（Codex 风格）
+## 六、思考强度滑条：点击弹出的拖动条（dsh-reasoning-effort 同款）
 
-工具栏常驻「思考 · 档名 ▾」入口（带迷你电量条，造型同原生），点击弹出吸附拖拽条面板（260ms 弹出动效：模糊渐显 + 过冲缩放；填充条弹性扫入，分段逐级点亮，换档发射涟漪、档名脉冲，段级联弹入），拖拽/点击/←→键即换档，点外部或 Esc 收起；**原生「思考级别」下拉经 CSS 隐藏（单档位固定徽章除外），走原生切换链路，会话内即时生效、无需重启**：
+工具栏常驻「思考 · 档名 ▾」入口（带迷你电量条，造型同原生），点击弹出拖动条面板（260ms 弹出动效：模糊渐显 + 过冲缩放；档名脉冲），拖拽/点击/←→键即换档，点外部或 Esc 收起；**原生「思考级别」下拉经 CSS 隐藏（单档位固定徽章除外），走原生切换链路，会话内即时生效、无需重启**：
 
 ```bash
 python zcode_patcher.py --thought-slider             # 注入 scripts/zcode-thought-slider.js
@@ -695,53 +695,50 @@ python zcode_patcher.py --thought-slider --revert    # 整体还原
 python zcode_patcher.py --thought-slider --slider-src /path/to/zcode-thought-slider.js
 ```
 
-### 样式规格（分段轨道）
+### 样式规格（1:1 复刻 HanaAyane/dsh-reasoning-effort，MIT）
 
-进度条 = 轨道 `.zslider-rail`（段容器）+ 每档一段 `.zslider-seg`（弱化底）+ 段内填充层 `.zslider-fill`
-（width 0↔100% 即点亮）+ 拖尾光斑 `.zslider-flare` + 扫光 `.zslider-shimmer`；轨道占满整行（**无左侧图标**）。
-改样式只动 `ensureStyle()` 的样式表与内联几何，**不碰任何交互/提交逻辑**。
+拖动条 = 32px 行 `.re-effort` + 30px 胶囊 `.re-effort-slider`（`--re-progress` 百分比驱动一切）：
+轨道 `.re-effort-track`（深色：暗夜蓝→紫渐变 `linear-gradient(100deg,#03040a…#5d35a0)` + 内高光；
+浅色：浅蓝底 `#e5f0ff` + `::before` 进度填充，width = `--re-progress`）+ 特效层 `.re-effort-fx`
+（canvas `.re-effort-canvas` 像素辐射 `drawRadiation`：4px 像素格能量柱 + 14 条拖尾粒子 + 旋钮径向辉光，
+深色 screen / 浅色 multiply×0.78）+ 拖尾光斑 `.re-effort-flare`（78px 椭圆 + 十字辉光伪元素）+
+白色圆形旋钮 `.re-effort-knob`（28px，`clamp(14px,…)` 贴边）。
+类名与数值与上游 styles.ts 逐字一致，便于对照；改样式只动 `ensureStyle()`，**不碰任何交互/提交逻辑**。
 
-- **段数**：默认 = 可用档位数；`__zsliderCtl.setSegments(n)` 可强制（2–8 段）。档位→段位按
-  `round(idx/(n-1)*(S-1))` 等比映射，点亮前 `lit+1` 段，`--zs-stagger`（i×45ms）让各段错开。
-- **主题**：颜色走 `--zs-*` 变量，判定顺序「应用主题类（`.dark`/`html.dark`/`body.dark`/`data-theme='dark'`）→
-  系统偏好 → 兜底」，与 TPS 同构。原实现只认 `prefers-color-scheme`，「应用深色 + 系统浅色」时轨道会
-  用浅色渐变压在深色面板上几乎看不见。
-- **几何**：厚度 `--zs-h`（16px，加粗胶囊）、段间隙 `--zs-gap`（5px）、段底色 `--zs-seg`、圆角统一 pill
-  （`--zs-r-pill`）；触控（`pointer:coarse`）热区撑到 40px。
-- **立体光泽**：填充层 `.zslider-fill` 用「外投影 + 内高光/内压深」双层 `box-shadow`，再叠一个
-  `::after` 纵向渐变（顶亮 → 中部透 → 底暗），避免加粗后成为整块平涂；段底 `.zslider-seg` 同样带
-  `inset` 阴影，未激活时也有凹槽感。
-- **四态**（写在 `track` 的 `data-zs` 上，样式表按态下发）：`loading` 段级联弹入（`zsSegIn`，
-  延迟 40+i×35ms）+ 轨道扫光 → `dragging` 跟手增辉、逐段点亮不延迟 → `settling` 涟漪
-  → `idle` 静止（max 档时最后一段的填充层外发光呼吸 `zsBreathe` 2.6s）。
-- **`data-thinking`（与 `data-zs` 正交）**：思考中 = `1`，激活段依次流动（`zsFlow`，周期
-  `--zs-flow` = `CONFIG.flowMs`）；空闲 = `0`，定格、rAF 停掉不空转。
-- **时长统一**：填充与光斑共用 `--zs-dur`/`--zs-ease`；拖拽时把 `--zs-dur` 置 `0ms` 跟手，松手移除恢复。
-  `prefers-reduced-motion` 下时长归零、动画全关。
-- **响应式**：面板宽 `min(236px, 100vw - 24px)`；resize / 滚动时按 rAF 节流重新贴合入口。
-- **两个坑**：① `.zslider-seg` 的入场动画是**内联** `animation`，优先级高于样式表——所以 max 档呼吸
-  必须挂在**段内填充层**上，挂段盒子会被整个顶掉；② 重建段（切模型 / `setSegments`）时要
-  `insertBefore(..., .zslider-shimmer/.zslider-flare)`，否则新段会盖住扫光与光斑。
+- **主题映射**：上游 `body[data-ds-dark-theme]` ↔ 本插件 `panel.zs-dark`（打开面板时按
+  「应用主题类 → 系统偏好 → 兜底」判一次，与 TPS 同构）；浅色分支即上游
+  `body:not([data-ds-dark-theme])` 块逐条移植。canvas 的 isDark 逐帧读 panel 类。
+- **状态类（与上游同款）**：`is-dragging`（旋钮 scale 1.07 + 过渡归零跟手、canvas
+  saturate/brightness 增辉、粒子加速 2.8×）、`is-busy`（提交中 opacity .72）、
+  `is-error`（未知档位描边）、slider `data-top`（顶端时轨道呼吸动画 `re-effort-*-breathe`
+  + 旋钮强泛光，深浅各一套 keyframes）。
+- **拖拽手感（上游同款）**：raw ∈ [0, n-1] **浮点连续**跟手（旋钮/光斑/canvas/档名预览实时跟随），
+  松手 `Math.round` 吸附最近档位提交；提交期间 is-busy，失败回弹原档位并 console.warn。
+  ←→/Home/End 直接提交一档（上游 onKeyDown 同款）。
+- **无障碍**：`prefers-reduced-motion` 下呼吸动画/跟手过渡全关，canvas 只画一帧（preview 变化补帧）。
+- **面板（本插件自有 chrome，非上游）**：宽 `min(236px, 100vw - 24px)`，玻璃渐变 +
+  backdrop-filter；标题行「思考强度 + 档名胶囊」；`outline:none` 压掉 `focus()` 的系统色焦点环。
+  resize / 滚动按 rAF 节流重新贴合入口。
 - **调试接口**：`__zsliderCtl.config`（直接改参数）、`.setThinking(true|false|null)`（手动锁定/恢复自动）、
-  `.setSegments(n)`、`.refresh()`、`.state()`、`.diag()`。
+  `.setSegments(n)`（已废弃，兼容保留）、`.refresh()`、`.state()`、`.diag()`。
 
 ### 原理（纯 DOM 观测 + 原生回调，零协议逆向）
 
 1. **读状态**：V4ComposerToolbar 渲染的隐藏 span（`className:"hidden"`）带 `data-thought`（当前档位）、`data-thought-levels`（该模型全部可用档位，逗号分隔）、`data-provider`/`data-model`，React 随会话实时更新——入口与面板 MutationObserver 监听其属性变化自动跟随原生操作（含 `t` 键循环切档），双向同步。
-2. **段数与档位动态**：取 `data-thought-levels`（off/minimal/low/medium/high/xhigh/max/ultra 等），模型配几档就几段，不硬编码；切模型导致档位数变化时段数跟着重建。
-3. **UI**：注入 `<style>` 隐藏原生触发器（`[data-composer-thought-control]:not([data-thought-level-fixed="true"])`，被隐藏的触发器仅作入口插入定位基准，`display:none` 元素的事件派发仍有效，菜单降级不受影响）；每段各自 `overflow:hidden` 裁剪（弹性过冲会让 width 短暂超过 100%，必须裁住否则溢出段外），扫光与光斑作为覆盖层留在 rail 末尾、重建段时不覆盖它们。
+2. **档位动态**：取 `data-thought-levels`（off/minimal/low/medium/high/xhigh/max/ultra 等），几档就映射到 0..n-1 连续轨道，不硬编码；切模型导致档位数变化时自动跟随。
+3. **UI**：注入 `<style>` 隐藏原生触发器（`[data-composer-thought-control]:not([data-thought-level-fixed="true"])`，被隐藏的触发器仅作入口插入定位基准，`display:none` 元素的事件派发仍有效，菜单降级不受影响）；特效层 `.re-effort-fx` 自带 `overflow:hidden`，canvas/光斑被圆角裁住；面板主题类 `zs-dark` 在打开时判定一次，主题中途切换需重开面板。
 4. **写档位**（按优先级）：
    - React fiber：从触发器 DOM 沿 `__reactFiber$` return 链找 `memoizedProps` 含 `onValueChange` 且 `option.type==='select'` 带数组选项的组件，直调之——等价于用户点选菜单项，原生继续走 `session/setThoughtLevel` 会话 RPC；
    - 降级：模拟点击触发器打开 Radix 菜单，按 options 顺序点第 index 个 `[role="option"]`（档位显示名是 i18n 文案，按序号而非文本定位）。
 5. **注入**：与 TPS 同链路（index.html `</body>` 前挂 `<script>` + 新增脚本条目，整体重打包），sidecar `app.asar.slider-patch.json`、备份 `app.asar.slider.bak`，外科手术式还原只摘自己的 tag。
 6. **隐藏条件**：模型无思考档位（`data-thought-levels` 空）、探针未命中、原生触发器不存在——均自动隐藏，不占空间。
-7. **生成中判定**（驱动激活段流动，选择器来自 3.14.3 renderer bundle 实证，非猜测）：① 停止按钮在场——客户端把「停止生成」与「发送」做成同一按钮位的**互斥渲染**，`aria-label` 取 i18n `chat.stop`（中文「停止生成」/ 英文「Stop generating」）；② `[data-v4-running-live-tail]`（正在跑的轮次容器）；③ `[data-reasoning-streaming-line]`（更窄，仅推理流期间）。命中结果 250ms 复用，避免流式期间反复强制布局；可用 `__zsliderCtl.setThinking(true|false|null)` 手动锁定/恢复自动。
+7. **生成中判定**（仅记录到 `state().thinking` 与 track 的 `data-thinking` 供诊断，新版样式无「思考中流动」态；选择器来自 3.14.3 renderer bundle 实证，非猜测）：① 停止按钮在场——客户端把「停止生成」与「发送」做成同一按钮位的**互斥渲染**，`aria-label` 取 i18n `chat.stop`（中文「停止生成」/ 英文「Stop generating」）；② `[data-v4-running-live-tail]`（正在跑的轮次容器）；③ `[data-reasoning-streaming-line]`（更窄，仅推理流期间）。命中结果 250ms 复用，避免流式期间反复强制布局；可用 `__zsliderCtl.setThinking(true|false|null)` 手动锁定/恢复自动。
 
 ### 验证 / 排障
 
-- 渲染 console 查 `[zslider] 已就绪: low/medium/high/max 当前 max`（加载 5s 后自检）；`window.__zsliderCtl.state()` 看档位 / 段数 / 思考态快照。
-- 拖拽后原生下拉状态同步变化（入口档名/电量条、`t` 键联动）= fiber 路径生效；console 出现 `[zslider] 档位提交失败` = fiber 与菜单降级均未命中（版本结构大改，需按「原理」重新对锚点）。
-- 激活段不流动 = 生成中判定没命中：先看 `__zsliderCtl.state().thinking`；`__zsliderCtl.setThinking(true)` 能出效果说明动效本身没问题，再查 `document.querySelector("button[aria-label*='停止']")` 确认自动判定（新版本改了 i18n 或按钮结构就要补 `THINK_SELECTORS`）。
+- 渲染 console 查 `[zslider] 已就绪: low/medium/high/max 当前 max`（加载 5s 后自检）；`window.__zsliderCtl.state()` 看档位 / 预览值 / 思考态快照。
+- 拖拽后原生下拉状态同步变化（入口档名/电量条、`t` 键联动）= fiber 路径生效；console 出现 `[zslider] 档位提交失败` = fiber 与菜单降级均未命中（版本结构大改，需按「原理」重新对锚点），此时滑条会自动回弹原档位。
+- `__zsliderCtl.state().thinking` 用于确认生成中判定（新版本改了 i18n 或按钮结构就要补 `THINK_SELECTORS`）；该字段不影响拖动条样式。
 - 入口不出现：先看探针——`document.querySelector('[data-thought][data-thought-levels]')` 是否有值；当前模型未配思考档位时不显示属预期。
 
 ## 七、增强提示词：「润色」按钮与跨机「Model is unavailable」
