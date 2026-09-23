@@ -1592,6 +1592,9 @@ if(status===400)return{kind:"bad-request",retry:!1,tip:"请求被上游拒绝（
 if(code==="timeout")return{kind:"timeout",retry:!0,tip:"网络超时，请检查代理或稍后重试"};
 if(code==="network")return{kind:"network",retry:!0,tip:"无法连接供应商，请检查网络与代理设置"};
 return{kind:"other",retry:!!(code!=="http"),tip:""}}
+// cand() 把命中档位名放在返回对象属性里;旧实现成功路径用外层 how(从未赋值,恒空串),
+// 诊断字段丢失。必须在循环前初始化:成功回调引用它时,声明语句还没执行(TDZ)。
+let how2=String((pick&&pick.how)||how);
 let lastRes=null,lastErr="";
 for(let cur of cs){
 let mod=cur.indexOf("https:")===0?httpsMod:httpMod;
@@ -1606,7 +1609,7 @@ if(j&&j.choices&&j.choices[0]){let m0=j.choices[0].message||{};out=String(m0.con
 if(!out&&j&&Array.isArray(j.content))out=j.content.map(function(c){return String(c&&c.text||"")}).join("");
 if(!out&&j&&typeof j.output_text==="string")out=j.output_text;
 out=String(out||"").trim();
-if(out)return resolve({success:!0,text:out,model:pick.mid,provider:pick.pid,how:how});
+if(out)return resolve({success:!0,text:out,model:pick.mid,provider:pick.pid,how:how2});
 return resolve({success:!1,code:"empty-reply",error:"模型返回了空内容（HTTP "+r2.statusCode+"）"});
 }catch(perr){return resolve({success:!1,code:"parse",error:"响应解析失败："+String(perr)})}}
 let msg="";
