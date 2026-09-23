@@ -36,6 +36,7 @@
 
 只想用命令行、不装插件？跳到 [方式 C](#方式-c只用命令行不装插件)。
 想一条命令跑完自检 + 构建 + 测试？用 [方式 D](#方式-d一键引导脚本跨平台推荐给开发者)。
+想完全无人值守、连部署都自动排期？用 [方式 E](#方式-e全自动流水线无人值守ci-与一键发布用)。
 
 ---
 
@@ -208,6 +209,76 @@ python bootstrap.py --python /path/to/py   # 指定解释器
 > 没有 `requirements.txt`、不需要 `pip install`。所以这一步实现为「校验依赖是否就位」，
 > 而不是执行网络安装。唯一的可选外部工具是 Node.js，只用于校验注入脚本语法，
 > 缺失时自动跳过，不影响其余步骤。
+
+### 方式 E：全自动流水线（无人值守，CI 与一键发布用）
+
+`bootstrap.py` 是**给人看的交互式引导**；`autopilot.py` 是**面向无人值守的流水线**：
+结构化日志、自动重试、自动装依赖、自动部署、机器可读报告 + 精确退出码。
+适合丢给 CI，也适合本机一条命令跑完发布。
+
+```bash
+./run.sh                 # macOS / Linux / Git Bash
+run.cmd                  # Windows（双击也行）
+```
+
+`run.sh` / `run.cmd` 只是薄封装：自动探测可用的 Python（`python3` / `python` / `py`）、
+切到脚本所在目录、把参数原样透传。不想用封装脚本就直接调用：
+
+```bash
+python autopilot.py                          # 全自动跑通（含部署）
+python autopilot.py --no-deploy              # 只跑到测试，完全不碰客户端
+python autopilot.py --unattended --report ci.md   # CI：不提问、汇总另存
+python autopilot.py --dry-run                # 全程预演，不写任何文件
+```
+
+六个步骤一条链：
+
+| 步骤 | 做什么 | 失败时 |
+|---|---|---|
+| `env` | 平台 / Python 版本 / 仓库根自检，校验 Python ≥ 3.10 | 停，退出码 `3` |
+| `deps` | 校验标准库完整性；**缺少 Node 会尝试自动安装**（winget / choco / scoop / brew / apt / dnf / yum / pacman / apk），装不上则降级跳过 | 停，退出码 `4` |
+| `build` | `py_compile` 全部 Python 脚本 + `node --check` 全部注入脚本 | 停，退出码 `1` |
+| `test` | 全套回归测试 + 滑条冒烟 | 停，退出码 `1`（**测试不绿就不会部署**） |
+| `deploy` | 客户端没跑 → 立即注入；**客户端在跑 → 自动挂载「退出后看护」**，退出 ZCode 时自动写入并重新拉起 | 退出码 `5` |
+| `verify` | `--all --check` 只读复核每一项；排期部署会明确说明「现在看到的仍是旧状态，属预期」 | 告警不中断 |
+
+**「无人值守」是怎么解决最核心矛盾的。** 补丁写入要求 ZCode 已退出（否则 `app.asar`
+被占用、配置会被回写覆盖），但无人值守场景下 ZCode 恰恰正在运行。所以 `deploy` 不会
+去硬闯运行守卫，而是自动挂载 `apply_after_exit.py` 看护进程：它会等到 ZCode 退出、
+自动写入、再把 ZCode 拉起来——全程无需人工，报告里记为「已排期」。
+你还可以照常继续用 ZCode，不会被中途打断。
+
+**错误处理。** 所有失败按类别分流，**只有「等一会儿就会好」的四类会自动重试**
+（文件被占用 / 网络抖动 / 超时 / 瞬时故障），退避 1s → 2s → 4s → 8s 封顶；
+构建错误、测试失败、权限不足这类重试没有意义，会立刻停下并给出针对性的修复建议。
+关键点在于：**重试与否只看错误类别，不看「是否致命」**——早先的实现把两者混在一起，
+导致所有可恢复错误都被静默剥夺了重试机会，而表面上完全看不出来。
+
+**日志与报告。** 每次运行都同时写两份，落在 `logs/`（已 gitignore）：
+
+| 文件 | 给谁看 | 内容 |
+|---|---|---|
+| `autopilot-<时间戳>.log` | 人 | 带时间戳的可读过程日志 |
+| `autopilot-<时间戳>.jsonl` | 机器 | 一行一个 JSON 事件，含 `step` / `kind` / `duration` / `attempts` / `retries`，结尾一条 `summary` 带 `exit_code` |
+
+汇总报告同时打到终端和日志文件；`--report <path>` 可以额外另存（CI 里用来上传 artifact）。
+
+退出码：
+
+| 码 | 含义 |
+|---|---|
+| `0` | 全绿 |
+| `1` | 有步骤失败（详情见汇总报告） |
+| `2` | 命令行参数写错（步骤名拼错、过滤后无事可做） |
+| `3` | 环境不满足（Python 版本过低、目录结构不对） |
+| `4` | 依赖无法自动满足且不可忽略 |
+| `5` | 部署被阻塞（客户端在运行且看护挂不上） |
+| `130` | 被 Ctrl-C 中断 |
+
+`2` 和 `1` 分开是有意为之：CI 里「参数写错」和「测试没过」得往两个完全不同的方向查。
+
+> 与 `bootstrap.py` 的分工：`bootstrap.py` 分步输出、可交互、适合人看着跑一遍；
+> `autopilot.py` 不提问、失败即退、有结构化日志，适合交给机器。
 
 ---
 
@@ -684,6 +755,9 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --reasoning-config
 marketplace.json                              插件市场清单（ZCode「添加插件市场」读它）
 .zcode-plugin/plugin.json                     插件清单（含 8 个功能开关的声明）
 bootstrap.py                                  跨平台引导：自检 + 依赖检查 + 构建 + 测试 + 状态
+autopilot.py                                  全自动流水线：装依赖 → 构建 → 测试 → 部署 → 验证
+run.sh / run.cmd                              单命令入口（自动探测 Python，参数透传）
+.github/workflows/ci.yml                      CI：三平台矩阵跑 autopilot，失败也上传报告
 commands/                                     四个斜杠命令
 hooks/hooks.json                              SessionStart 钩子（调用 sync.py 同步开关）
 skills/zcode-tokenspeed/
@@ -718,6 +792,14 @@ python bootstrap.py            # 一条命令：自检 + 依赖检查 + 构建�
 上面的引导脚本是跨平台的（Windows / macOS / Linux），仓库根由脚本位置推导，
 Python / Node 通过 `which` / `where` 自动定位，源码中不含任何机器相关路径。
 细节见 [方式 D](#方式-d一键引导脚本跨平台推荐给开发者)。
+
+发版前建议跑流水线（它会**先跑完测试再部署**，测试不绿绝不写客户端）：
+
+```bash
+./run.sh                       # 或 Windows 下 run.cmd；等价于 python autopilot.py
+```
+
+细节见 [方式 E](#方式-e全自动流水线无人值守ci-与一键发布用)。
 
 也可以只跑测试：
 

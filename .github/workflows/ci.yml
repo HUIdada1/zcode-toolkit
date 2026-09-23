@@ -3,15 +3,32 @@ name: ci
 on:
   push:
   pull_request:
+  # 手动触发（可在 Actions 页面指定分支跑一次全量流水线）
+  workflow_dispatch:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  # ---------------------------------------------------------------------------
+  # 主流水线：直接调用 autopilot.py，一次跑完 env -> deps -> build -> test
+  # CI 环境不注入 app.asar（--no-deploy），部署步骤由本机看护脚本负责
+  # ---------------------------------------------------------------------------
+  pipeline:
+    name: autopilot (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # README 声明「Python ≥ 3.10」，这里就用 3.10 兜底，防止误用更高版本才有的 API
-        python-version: ["3.10", "3.12", "3.13"]
+        include:
+          # README 声明「Python >= 3.10」，用 3.10 兜底，防止误用更高版本才有的 API
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
 
@@ -23,16 +40,26 @@ jobs:
         with:
           node-version: "22"
 
-      # 目录名兼容两种仓库布局：扁平 scripts/ 与插件 skills/zcode-tokenspeed/scripts/
-      - name: 语法检查（Python）
+      # 全自动流水线：依赖自检 -> 构建检查 -> 回归测试，产出机器可读报告
+      - name: 全自动流水线（autopilot）
+        if: hashFiles('autopilot.py') != ''
+        run: python autopilot.py --no-deploy --unattended --report ci-report.md --log logs/ci.log
+
+      # 兼容旧布局：若仓库里还没有 autopilot.py，退回逐项语法检查
+      - name: 语法检查（Python，回退路径）
+        if: hashFiles('autopilot.py') == ''
+        shell: bash
         run: |
           set -e
+          # 目录名兼容两种仓库布局：扁平 scripts/ 与插件 skills/zcode-tokenspeed/scripts/
           for d in scripts skills/zcode-tokenspeed/scripts; do
             [ -d "$d" ] || continue
             python -m py_compile "$d"/*.py
           done
 
-      - name: 语法检查（注入脚本）
+      - name: 语法检查（注入脚本，回退路径）
+        if: hashFiles('autopilot.py') == ''
+        shell: bash
         run: |
           set -e
           for d in scripts skills/zcode-tokenspeed/scripts; do
@@ -40,5 +67,19 @@ jobs:
             for f in "$d"/*.js; do node --check "$f"; done
           done
 
-      - name: 回归测试
+      - name: 回归测试（回退路径）
+        if: hashFiles('autopilot.py') == ''
         run: python -m unittest discover -s tests -v
+
+      # 无论成功失败都留下报告与日志，便于定位偶发问题
+      - name: 上传流水线报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-report-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: |
+            ci-report.md
+            logs/*.log
+            logs/*.jsonl
+          if-no-files-found: ignore
+          retention-days: 14

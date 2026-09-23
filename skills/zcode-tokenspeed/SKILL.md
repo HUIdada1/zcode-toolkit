@@ -287,6 +287,77 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 5. **重启验证**：完全退出并重启 ZCode（Windows 运行中锁 app.asar，打补丁前必须退出；脚本已内置进程预检）后，按各功能的「验证」说明确认。
 6. **失败回退**：执行上面展示的还原命令 → 重启 ZCode → 重新核实。思考等级补丁还原走 zcode.cjs.bak；状态栏还原自动清理 `.tps.bak` 与 sidecar。
 
+## 全自动流水线（`autopilot.py`，无人值守场景用这条）
+
+用户在**会话里**要求「一把跑完」「自动部署」「全自动」「不用我管」时，不要手敲上面那一串单命令，
+直接用仓库根的流水线 —— 它把「环境自检 → 装依赖 → 构建 → 测试 → 部署 → 验证」串成一条链，
+并自带重试、双通道日志与精确退出码。
+
+```bash
+python autopilot.py                                  # 本机全自动（含部署）
+python autopilot.py --no-deploy                      # 只跑到测试，完全不碰客户端
+python autopilot.py --unattended --report ci.md      # 无人值守 + 汇总另存（CI 用）
+python autopilot.py --dry-run                        # 全程预演，不写任何文件
+python autopilot.py --only build,test --verbose      # 只跑指定步骤，看调试细节
+python autopilot.py --max-retries 5                  # 提高可恢复错误的默认重试次数
+```
+
+跨平台入口：`./run.sh`（macOS / Linux / Git Bash）与 `run.cmd`（Windows，双击可用）——
+自动探测可用的 Python、切到脚本所在目录、参数原样透传。仓库里**没有任何写死的本机路径**。
+
+### ★ 无人值守的核心矛盾与解法（AI 代执行前必须理解）
+
+`zcode_patcher.zcode_running()` 是**全局运行守卫**：只要 `ZCode.exe` 还在进程表里就拒绝写入。
+而无人值守的调用**恰恰总是发生在 ZCode 运行中**（SessionStart 钩子、用户在会话里喊「跑一遍」）。
+所以 `deploy` 步骤不会去硬闯守卫，而是**自动挂载 `apply_after_exit.py` 看护**：
+
+- 客户端没跑 → 立即 `--all` 注入，本步当场完成；
+- 客户端在跑 → 挂看护并记 `deferred_step["scheduled"] = True`，报告里写「已排期」。
+
+看护会等 ZCode **完全退出**、自动写入、再把 ZCode 拉起来 —— 全程无需人工。
+汇报给用户时务必说清：**「本次改动已排期，下次完全退出 ZCode 时自动生效」**，
+不要说成「已完成」，否则用户会以为补丁没起作用。
+
+> 想让改动**立刻**生效（不想等下次退出）：请用户完全退出 ZCode，然后前台跑
+> `python "<插件目录>/skills/zcode-tokenspeed/scripts/sync.py"`（结论打终端 + `_sync.log`）。
+> 沙箱/工具进程**无法**起脱离进程，所以这件事只能请用户做。
+
+### 错误处理：重试与否只看类别，不看「是否致命」
+
+`ErrorKind.RETRYABLE = {transient, network, timeout, lock}` 这四类会退避重试
+（1s → 2s → 4s → 8s 封顶）；build / test / permission / env / dep 立刻停下并给出修复建议。
+
+**这里有个已经踩过的退化，改动 `execute_step()` 时别踩回去**：早先写成
+`retryable = exc.kind in RETRYABLE and not exc.fatal`，而 `StepFailure.fatal` 默认 `True`
+—— 于是所有可恢复错误都被静默剥夺了重试机会，重试机制**看起来实现、实际从未生效**，
+且不报任何错，只表现为「偶尔失败」。`fatal` 的语义是「这一步最终会记为失败」，
+**不是**「禁止重试」。
+
+### 日志与退出码（汇报时引用这两个）
+
+每次运行在 `logs/`（已 gitignore）同时写两份：`autopilot-<时间戳>.log`（人读）与
+`.jsonl`（机器读，含 `step`/`kind`/`duration`/`attempts`/`retries`，结尾 `summary` 带 `exit_code`）。
+
+| 码 | 含义 |
+|---|---|
+| `0` | 全绿 |
+| `1` | 有步骤失败 |
+| `2` | 命令行参数写错（步骤名拼错、过滤后无事可做） |
+| `3` | 环境不满足（Python < 3.10、目录结构不对） |
+| `4` | 依赖无法自动满足且不可忽略 |
+| `5` | 部署被阻塞（客户端在运行且看护挂不上） |
+| `130` | 被 Ctrl-C 中断 |
+
+`2` 与 `1` 分开是有意为之：CI 里「参数写错」和「测试没过」得往完全不同的方向查。
+
+### CI
+
+`.github/workflows/ci.yml` 用 `matrix.include` 覆盖 `ubuntu-latest`（py 3.10 / 3.12 / 3.13）、
+`windows-latest`（3.12）、`macos-latest`（3.12），主步骤为
+`python autopilot.py --no-deploy --unattended --report ci-report.md`（CI 不注入 app.asar）。
+仓库里还没有 `autopilot.py` 时会自动回退到逐项语法检查 + `unittest discover`。
+报告与日志用 `actions/upload-artifact@v4` 在 `always()` 下上传，便于定位偶发失败。
+
 ## 跨平台约定
 
 | 系统 | 安装根目录（resources 的上一级） | 典型位置 |
@@ -298,8 +369,9 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 - 关键文件相对安装根目录固定：`resources/glm/zcode.cjs`（内核）、`resources/app.asar`（桌面端资源包）
 - Python ≥ 3.10，用系统可用的 `python3`/`python` 即可，脚本仅用标准库
 - 改动脚本后先跑回归测试：`python -m unittest discover -s tests -v`（纯标准库；含 asar 重打包往返、
-  备份指纹、档位配置迁移、注入代码语法、峰值内存约束等 57 个用例（数量以 `tests/` 实际为准）；
+  备份指纹、档位配置迁移、注入代码语法、峰值内存约束等用例（数量以 `tests/` 实际为准）；
   本机装了 ZCode 时还会只读校验真实 asar 的 integrity）
+- 一键跑完整链（含只读核实与自动部署排期）用仓库根的全自动流水线，见上节「全自动流水线」
 - Program Files / /Applications 类目录可能需要管理员/sudo 权限
 - 执行 AI 可按上述规则自行定位安装（如 `ls /Applications`、查运行中进程的 exe 路径）
 

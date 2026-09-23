@@ -26,6 +26,9 @@ __pycache__/
 tap-capture*.jsonl
 probe-max-tokens*.jsonl
 
+# 全自动流水线日志（autopilot.py / run.sh / run.cmd 运行时产物）
+logs/
+
 # 编辑器 / 系统
 .vscode/
 .idea/

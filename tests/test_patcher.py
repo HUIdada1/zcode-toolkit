@@ -25,6 +25,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -2513,6 +2514,631 @@ class TestBootstrapScript(unittest.TestCase):
         exec_pos = body.index("subprocess.run")
         self.assertLess(dry_pos, exec_pos,
                         "dry_run 判断必须在 subprocess.run 之前")
+
+
+# --------------------------------------------------------------------------- #
+# autopilot.py —— 全自动流水线（无人工干预）
+# --------------------------------------------------------------------------- #
+
+def _load_autopilot():
+    """把 autopilot.py 当独立模块加载。
+
+    必须**先登记进 sys.modules**：文件里用了 `@dataclass`，dataclass 在装饰时会
+    回头查 `sys.modules[cls.__module__]`，没登记就抛
+    `AttributeError: 'NoneType' object has no attribute '__dict__'`
+    —— 报错位置在装饰器里，看起来完全不像「模块没登记」，很难猜。
+    """
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "autopilot.py"
+    if not path.is_file():
+        raise unittest.SkipTest("未找到 autopilot.py")
+    spec = importlib.util.spec_from_file_location("_ap_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_ap_under_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod, path
+
+
+class TestAutopilotErrorClassification(unittest.TestCase):
+    """`autopilot.py` 的错误分类是所有重试决策的唯一依据。
+
+    分错类的后果不是「报错难看」，而是**行为错误**：
+      * 把「文件被占用」判成不可恢复 → 明明等 1 秒就好，却直接失败收工；
+      * 把「语法错误」判成可恢复 → 白白重试 3 轮、每次退避到 8 秒，
+        用户盯着屏幕等半分钟才看到一句 SyntaxError。
+
+    这些关键词的**判断顺序**也和内容一样重要（例如 "timed out" 必须归到
+    TIMEOUT 而不是 NETWORK），所以下面用真实报错原文逐条钉死。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ap, cls._path = _load_autopilot()
+
+    def test_known_error_texts_map_to_expected_kind(self):
+        cases = [
+            # —— 锁：客户端还在跑 / 文件句柄没释放 ——
+            ("检测到 ZCode 正在运行，拒绝写入", "lock"),
+            ("[WinError 32] The process cannot access the file", "lock"),
+            # —— 权限 ——
+            ("Permission denied: '/opt/ZCode/app.asar'", "permission"),
+            ("拒绝访问", "permission"),
+            # —— 网络 ——
+            ("Connection reset by peer", "network"),
+            ("proxy CONNECT aborted / tunnel connection failed", "network"),
+            # —— 超时：注意这里刻意用 "timed out" 的原文，
+            #    它早先被塞进 NETWORK 关键词表，导致超时永远不按超时退避 ——
+            ("Command timed out after 300s", "timeout"),
+            # —— 构建：语法错误不该重试 ——
+            ("SyntaxError: invalid syntax (line 42)", "build"),
+            # —— 测试：unittest 的失败摘要 ——
+            ("FAILED (failures=3)", "test"),
+            ("FAILED (errors=1)", "test"),
+            # —— 依赖缺失 ——
+            ("python.exe: command not found", "dep"),
+        ]
+        for text, want in cases:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    self.ap.classify(text), want,
+                    f"{text!r} 应归为 {want}，实际 {self.ap.classify(text)!r}")
+
+    def test_only_transient_kinds_are_retried(self):
+        """可重试集合必须**只**包含「等一会儿就会好」的类型。
+
+        多一个（比如 build）就是白等；少一个（比如 lock）就是把可自愈的问题
+        直接判死。两个方向都在这条断言里钉住。
+        """
+        self.assertEqual(
+            set(self.ap.ErrorKind.RETRYABLE),
+            {"transient", "network", "timeout", "lock"},
+            "可重试类别集合发生了变化，请同时更新退避策略的说明")
+
+    def test_non_retryable_kinds_are_excluded(self):
+        for k in ("permission", "build", "test", "env", "dep", "unknown"):
+            with self.subTest(kind=k):
+                self.assertNotIn(k, self.ap.ErrorKind.RETRYABLE)
+
+
+class TestAutopilotRetryExecutor(unittest.TestCase):
+    """`execute_step()` 的重试语义。
+
+    这里防的是一个**已经真实发生过**的退化：实现早期写成
+    `retryable = exc.kind in RETRYABLE and not exc.fatal`，
+    而 `StepFailure.fatal` 默认就是 `True` —— 于是所有可恢复错误都在
+    “fatal 保护”的名义下被静默剥夺了重试机会，重试机制**看起来实现了、实际从未生效**。
+    更糟的是它不会报任何错，只表现为「偶尔失败」。
+    下面的用例专门覆盖这个反例。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ap, cls._path = _load_autopilot()
+
+    def _log(self, d):
+        return self.ap.Logger(Path(d) / "t.log", echo=False)
+
+    def test_retryable_error_retries_then_succeeds(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = self._log(d)
+            state = {"n": 0}
+
+            def flaky(lg, dr):
+                state["n"] += 1
+                if state["n"] < 3:
+                    # fatal 保持默认 True —— 正是过去把这个字段当“禁止重试”用的场景
+                    raise self.ap.StepFailure("检测到 ZCode 正在运行",
+                                              kind=self.ap.ErrorKind.LOCK)
+
+            r = self.ap.execute_step("deploy", flaky, log,
+                                     max_retries=5, dry_run=True)
+            self.assertEqual(r.status, "ok", f"detail={r.detail}")
+            self.assertEqual(r.retries_used, 2)
+            self.assertEqual(state["n"], 3)
+
+    def test_non_retryable_error_fails_on_first_attempt(self):
+        """语法错误必须**一次就停** —— 重试不可能把写错的代码变对。"""
+        with tempfile.TemporaryDirectory() as d:
+            log = self._log(d)
+            calls = {"n": 0}
+
+            def broken(lg, dr):
+                calls["n"] += 1
+                raise self.ap.StepFailure("SyntaxError: bad",
+                                          kind=self.ap.ErrorKind.BUILD)
+
+            r = self.ap.execute_step("build", broken, log,
+                                     max_retries=5, dry_run=True)
+            self.assertEqual(calls["n"], 1, "不可恢复错误不该被重试")
+            self.assertEqual(r.status, "failed")
+            self.assertEqual(r.kind, self.ap.ErrorKind.BUILD)
+
+    def test_retry_count_is_bounded_by_max_retries(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = self._log(d)
+            calls = {"n": 0}
+
+            def always_locked(lg, dr):
+                calls["n"] += 1
+                raise self.ap.StepFailure("WinError 32 文件被占用",
+                                          kind=self.ap.ErrorKind.LOCK)
+
+            r = self.ap.execute_step("deploy", always_locked, log,
+                                     max_retries=2, dry_run=True)
+            self.assertEqual(calls["n"], 3, "总尝试次数应为 max_retries+1")
+            self.assertEqual(r.status, "failed")
+            # 这条断言防的是一个已经踩过的统计口径错误：原实现里
+            # retries_used 只在**最终成功**的分支赋值，于是「失败了但重试过 2 次」
+            # 会被报成「重试 0 次」—— 汇总报告与 JSONL 都在撒谎，
+            # 而它恰恰是最需要用户看到的场景（重试了还是不行）。
+            self.assertEqual(r.retries_used, 2)
+
+    def test_unexpected_exception_is_classified_not_dropped(self):
+        """没抛 StepFailure 的意外异常也要被接住、归类、留痕，而不是冒泡炸掉整条流水线。"""
+        with tempfile.TemporaryDirectory() as d:
+            log = self._log(d)
+
+            def boom(lg, dr):
+                raise ValueError("Permission denied while opening file")
+
+            r = self.ap.execute_step("env", boom, log,
+                                     max_retries=0, dry_run=True)
+            self.assertEqual(r.status, "failed")
+            self.assertEqual(r.kind, self.ap.ErrorKind.PERMISSION, r.kind)
+            self.assertIn("ValueError", r.detail, "应保留原始异常类型名便于排查")
+
+    def test_dry_run_does_not_sleep(self):
+        """`--dry-run` 下重试不能真的 sleep，否则预演要等好几个 8 秒。"""
+        with tempfile.TemporaryDirectory() as d:
+            log = self._log(d)
+            calls = {"n": 0}
+
+            def always_locked(lg, dr):
+                calls["n"] += 1
+                raise self.ap.StepFailure("占用", kind=self.ap.ErrorKind.LOCK)
+
+            t0 = time.time()
+            self.ap.execute_step("deploy", always_locked, log,
+                                 max_retries=4, dry_run=True)
+            self.assertLess(time.time() - t0, 1.0,
+                            "dry-run 下重试退避应被跳过（否则就是真的在等）")
+            self.assertEqual(calls["n"], 5)
+
+
+class TestAutopilotLogger(unittest.TestCase):
+    """双通道日志：人看 `.log`，机器读 `.jsonl`。
+
+    这个项目里「机器读」不是锦上添花 —— 看护脚本、CI、doctor 都要靠事件流判断
+    流水线到底停在哪一步，所以 JSONL 的**字段名**是接口，必须有测试兜住。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ap, cls._path = _load_autopilot()
+
+    def test_dual_channel_files_are_both_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            lp = Path(d) / "run.log"
+            log = self.ap.Logger(lp, echo=False)
+            log.begin("build", "构建")
+            log.info("普通信息")
+            log.warn("警告信息")
+            log.err("错误信息")
+
+            self.assertTrue(lp.is_file() and lp.stat().st_size > 0, "文本日志未写入")
+            jl = lp.with_suffix(".jsonl")
+            self.assertTrue(jl.is_file() and jl.stat().st_size > 0, "JSONL 日志未写入")
+
+            # 文本日志必须是 UTF-8 —— cp936 环境下写中文不能炸
+            self.assertIn("警告信息", lp.read_text(encoding="utf-8"))
+
+    def test_jsonl_is_one_object_per_line_with_stable_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            lp = Path(d) / "run.log"
+            log = self.ap.Logger(lp, echo=False)
+            log.begin("build", "构建")
+            log.event("retry", "重试", kind=self.ap.ErrorKind.LOCK, extra={"delay": 2})
+            log.event("step-end", "build failed", level="error",
+                      extra={"duration": 1.5, "attempts": 2})
+
+            lines = lp.with_suffix(".jsonl").read_text(encoding="utf-8").splitlines()
+            entries = [json.loads(x) for x in lines]
+            self.assertEqual(len(entries), len(lines), "存在解析不了的行")
+
+            self.assertTrue(any(e.get("step") == "build" for e in entries),
+                            "缺少 step 字段")
+            self.assertTrue(any(e.get("kind") == self.ap.ErrorKind.LOCK for e in entries),
+                            "缺少 kind 字段")
+            self.assertTrue(any("duration" in e for e in entries), "缺少 duration 字段")
+            self.assertTrue(any(e["event"] == "retry" for e in entries), "缺少 retry 事件")
+            for e in entries:
+                self.assertIn("ts", e, "每条事件都要带时间戳")
+
+            # ISO 8601 ⇒ 字典序 == 时间序，CI 里可以直接 sort/比较
+            ts = [e["ts"] for e in entries]
+            self.assertEqual(ts, sorted(ts), "时间戳不是可排序的 ISO8601")
+
+    def test_logger_without_path_writes_nothing(self):
+        """`Logger(None)` 必须完全静默 —— dry-run / 单测里不能到处漏出文件。"""
+        log = self.ap.Logger(None, echo=False)
+        self.assertIsNone(log.text_path)
+        log.info("不该落盘")
+
+    def test_step_end_event_carries_retry_and_duration(self):
+        """`step-end` 是流水线的权威记录点，缺失字段会让报告无从统计。"""
+        with tempfile.TemporaryDirectory() as d:
+            lp = Path(d) / "run.log"
+            log = self.ap.Logger(lp, echo=False)
+            self.ap.execute_step("env", lambda lg, dr: None, log,
+                                 max_retries=0, dry_run=True)
+            entries = [json.loads(x) for x in
+                       lp.with_suffix(".jsonl").read_text(encoding="utf-8").splitlines()]
+            ends = [e for e in entries if e["event"] == "step-end"]
+            self.assertEqual(len(ends), 1, f"应有且仅有一条 step-end：{entries}")
+            self.assertEqual(ends[0]["step"], "env")
+            self.assertIn("duration", ends[0])
+            self.assertIn("attempts", ends[0])
+            self.assertIn("retries", ends[0])
+
+
+class TestAutopilotSummary(unittest.TestCase):
+    """汇总报告是**交给人看的唯一产物**（终端刷过去就没了）。
+
+    所以它必须回答三个问题：哪一步挂了、为什么挂、接下来怎么办。
+    这条测试把「为什么/怎么办」也钉住 —— 只报「build 失败」的日志，
+    用户还得自己回来读源码才知道怎么修。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ap, cls._path = _load_autopilot()
+
+    def test_summary_reports_failure_kind_and_remedy(self):
+        results = [
+            self.ap.StepResult(name="env", status="ok", duration=0.1),
+            self.ap.StepResult(name="build", status="failed",
+                               kind=self.ap.ErrorKind.BUILD,
+                               detail="SyntaxError: invalid syntax\n  line 2",
+                               duration=1.2),
+            self.ap.StepResult(name="test", status="skipped", detail="前序步骤失败"),
+        ]
+        rep = self.ap.build_summary(results, elapsed=3.4, log_path=Path("logs/x.log"),
+                                    deps={"client_version": "3.14.3",
+                                          "node": "/usr/bin/node"},
+                                    deferred_step={})
+        self.assertIn("失败 1 步", rep)
+        self.assertIn("构建失败", rep, "应把错误类别翻成中文可读名")
+        self.assertIn("改完代码重跑", rep, "应附上针对该类错误的修复建议")
+        # 路径分隔符随平台变化（Windows 是反斜杠），所以比文件名而不是完整路径
+        self.assertIn("x.log", rep)
+        self.assertIn("jsonl", rep, "应提示机器可读日志的位置")
+        self.assertIn("3.14.3", rep, "应带上客户端版本，便于对号入座")
+
+    def test_summary_explains_deferred_deploy_needs_no_human(self):
+        """部署被排期（客户端正在运行）时，报告必须说清「不用你做任何事」。
+
+        否则用户看到 deploy 是 ok 却没生效，只会以为流水线骗人。
+        """
+        rep = self.ap.build_summary(
+            [self.ap.StepResult(name="deploy", status="ok", duration=1.0)],
+            elapsed=1.0, log_path=None, deps={},
+            deferred_step={"scheduled": True})
+        self.assertIn("已排期", rep)
+        self.assertIn("无需人工", rep)
+
+    def test_every_retryable_kind_has_a_remedy(self):
+        """每个可能出现在报告里的错误类别都要有对应建议，不能漏成空字符串。"""
+        for kind in (self.ap.ErrorKind.LOCK, self.ap.ErrorKind.NETWORK,
+                     self.ap.ErrorKind.TIMEOUT, self.ap.ErrorKind.PERMISSION,
+                     self.ap.ErrorKind.BUILD, self.ap.ErrorKind.TEST,
+                     self.ap.ErrorKind.DEP, self.ap.ErrorKind.ENV):
+            with self.subTest(kind=kind):
+                r = self.ap.StepResult(name="build", status="failed", kind=kind)
+                self.assertTrue(self.ap._remedy(r).strip(),
+                                f"{kind} 缺少修复建议")
+
+
+class TestAutopilotSafety(unittest.TestCase):
+    """流水线是「无人值守」的 —— 安全边界只能靠代码本身守，没有人在旁边喊停。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ap, cls._path = _load_autopilot()
+        cls._src = cls._path.read_text(encoding="utf-8")
+
+    def test_no_machine_specific_absolute_paths(self):
+        banned = [
+            "D:\\ZCode", "D:/ZCode",
+            "C:\\Users\\80361", "C:/Users/80361",
+            "F:\\ZcodeData", "F:/ZcodeData",
+            "F:\\WorkBuddyAI", "F:/WorkBuddyAI",
+            ".workbuddy-ai/binaries",
+        ]
+        hits = [b for b in banned if b in self._src]
+        self.assertEqual(hits, [], f"autopilot.py 写死了本机路径：{hits}")
+
+    def test_repo_root_derived_from_dunder_file(self):
+        self.assertIn("Path(__file__).resolve().parent", self._src)
+
+    def test_running_client_defers_instead_of_forcing(self):
+        """客户端在跑时必须**转交看护**，绝不能绕过运行守卫硬写。
+
+        这条是整条流水线最关键的安全约束：绕过守卫直接改写 app.asar，
+        轻则被客户端覆写回去，重则让正在运行的实例读到半截文件。
+        """
+        self.assertIn("_zcode_running()", self._src,
+                      "部署前必须检查客户端是否在运行")
+        body = self._src.split("def step_deploy(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("apply_after_exit", body,
+                      "客户端在运行时应当挂看护脚本，而不是直接写")
+        self.assertIn("_zcode_running()", body)
+
+    def test_run_guard_is_delegated_to_zcode_patcher(self):
+        """运行守卫必须复用 `zcode_patcher` 的实现，不能自己另写一份。
+
+        自己再写一份 `tasklist` 解析，迟早会和主实现漂移（客户端改进程名、
+        守卫那边补了「正在退出中」的宽限期判断……）。而这里的判断决定的正是
+        「直接写 app.asar」还是「转交看护」—— 判错就会去动正在运行的文件。
+
+        同时这条也钉住了「拿不到主实现时不能让模块 import 失败」：
+        CI 里经常只把本文件单独加载，没有 scripts 目录在 sys.path 上。
+        """
+        self.assertIsNotNone(self.ap._native_zcode_running,
+                             "应提供 _native_zcode_running() 包装")
+        # 在本仓库环境里，scripts 目录是可导入的，守卫应当真的借到了
+        self.assertIsNotNone(self.ap._import_run_guard(),
+                             "在本仓库里应当能导入 zcode_patcher.zcode_running")
+        guard = self.ap._import_run_guard()
+        self.assertTrue(callable(guard))
+        # 借来的必须就是主实现本体，而不是又被包了一层
+        import zcode_patcher as zp
+        self.assertIs(guard, zp.zcode_running,
+                      "_native_zcode_running 必须直接复用 zcode_patcher.zcode_running")
+
+    def test_running_guard_unavailable_falls_back_without_crashing(self):
+        """主实现不可用时要降级到自带探测，而不是抛异常拖垮流水线。
+
+        `_native_zcode_running()` 用 None 表示「拿不到权威判断」，
+        必须和「客户端没在运行」的 False 区分开 —— 混为一谈会让降级路径
+        在客户端真的在跑时也返回「没在跑」，进而绕过运行守卫。
+        """
+        saved = self.ap._NATIVE_ZCODE_RUNNING
+        try:
+            self.ap._import_run_guard = lambda: None      # 模拟导入不到
+            self.ap._NATIVE_ZCODE_RUNNING = None
+            self.assertIsNone(self.ap._native_zcode_running(),
+                              "拿不到守卫时应返回 None（而不是 False）")
+            # 兜底实现仍然要给出一个 bool，而不是崩掉
+            self.ap._native_zcode_running = lambda: None
+            self.assertIsInstance(self.ap._zcode_running(), bool)
+        finally:
+            self.ap._NATIVE_ZCODE_RUNNING = saved
+
+    def test_children_suppress_console_window_on_windows(self):
+        self.assertIn("CREATE_NO_WINDOW", self._src)
+        self.assertIn("0x08000000", self._src)
+
+    def test_subprocess_calls_avoid_shell(self):
+        import ast
+        tree = ast.parse(self._src)
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "run":
+                for kw in node.keywords:
+                    if kw.arg == "shell" and getattr(kw.value, "value", False):
+                        offenders.append(node.lineno)
+        self.assertEqual(offenders, [], f"第 {offenders} 行使用了 shell=True")
+
+    def test_no_high_unicode_glyphs_in_source(self):
+        """源码里不得出现 ✓✗⚠ 这类字符。
+
+        它们既可能出现在 print 里（cp936 管道下抛 UnicodeEncodeError），
+        也可能被写进 .cmd 批处理（cmd.exe 按 OEM 代码页解析，非 ASCII 会破坏语法）。
+        统一用 [*]/[+]/[!]/[x] 标记。
+        """
+        bad = [g for g in "✓✗⚠✅↻✔✘" if g in self._src]
+        self.assertEqual(bad, [], f"autopilot.py 使用了高位 Unicode 符号：{bad}")
+
+    def test_never_downloads_and_pipes_a_binary(self):
+        """自动装依赖只走包管理器，不 `curl ... | sh`。
+
+        无人值守场景下静默下载并执行二进制是不可接受的安全风险
+        （无人复核、出错也没人拦）。
+
+        注意断言的是**可执行行为**，不是字符串出现 —— 实现里有一句
+        「不去 curl 下载安装包」的说明性注释，用子串匹配会把注释也判成违规。
+        """
+        src = self._src
+        # 真正的风险形态是「下载器 + 管道进解释器」
+        for pat in (r"\|\s*(?:sudo\s+)?(?:ba)?sh\b",
+                    r"\|\s*python[0-9.]*\s*$",
+                    r"Invoke-Expression",
+                    r"\biex\b"):
+            with self.subTest(pattern=pat):
+                self.assertIsNone(re.search(pat, src, re.MULTILINE),
+                                  f"不应出现下载即执行的形态：{pat}")
+        # curl/wget 本身不算违规（下载到文件是可接受的），但必须没有管道执行
+        m = re.search(r"(curl|wget)[^\n]*\|", src)
+        self.assertIsNone(m, f"curl/wget 被接进了管道：{m.group(0) if m else ''}")
+
+    def test_step_names_have_titles_and_handlers(self):
+        """STEPS 里每个名字都要有标题和实现，别留下半截。
+
+        `deps` 的实现函数叫 `ensure_dependencies` 而不是 `step_deps`
+        —— 它还要把依赖清单**返回**给 deploy/verify 用。所以这里查
+        `STEP_FUNCS` 映射表，而不是硬按 `step_<name>` 拼名字。
+        """
+        self.assertEqual(self.ap.STEPS, list(self.ap.STEP_FUNCS),
+                         "STEPS 与 STEP_FUNCS 的键必须一一对应且顺序一致")
+        for name in self.ap.STEPS:
+            with self.subTest(step=name):
+                self.assertIn(name, self.ap.STEP_TITLES, f"步骤 {name} 缺标题")
+                fn_name = self.ap.STEP_FUNCS[name]
+                self.assertTrue(hasattr(self.ap, fn_name),
+                                f"步骤 {name} 的实现 {fn_name}() 不存在")
+                self.assertTrue(callable(getattr(self.ap, fn_name)))
+
+    def test_exit_codes_are_distinct_and_documented(self):
+        """退出码是给 CI/看护读的接口：必须彼此不同，且文档里说清了语义。"""
+        codes = {
+            "EXIT_OK": self.ap.EXIT_OK,
+            "EXIT_FAILED": self.ap.EXIT_FAILED,
+            "EXIT_BAD_ARGS": self.ap.EXIT_BAD_ARGS,
+            "EXIT_ENV": self.ap.EXIT_ENV,
+            "EXIT_DEP": self.ap.EXIT_DEP,
+            "EXIT_DEPLOY_BLOCKED": self.ap.EXIT_DEPLOY_BLOCKED,
+            "EXIT_INTERRUPTED": self.ap.EXIT_INTERRUPTED,
+        }
+        self.assertEqual(codes["EXIT_OK"], 0)
+        self.assertEqual(len(set(codes.values())), len(codes),
+                         f"退出码有重复（外部无法区分）：{codes}")
+        # 全部非 0 码都必须落在 1..255 这个进程退出码的合法区间里
+        for name, code in codes.items():
+            with self.subTest(code=name):
+                self.assertTrue(0 <= code <= 255, f"{name}={code} 超出退出码范围")
+        # 文档字符串是这套码对外唯一的说明处，逐个核对
+        for name, code in codes.items():
+            with self.subTest(documented=name):
+                self.assertIn(str(code), self._src, f"{name} 未在文档字符串中说明")
+
+    def test_failure_exit_code_reflects_which_step_broke(self):
+        """env/dep 挂掉要返回各自的专用码 —— 否则调用方只能去猜。"""
+        mk = lambda kind, name="env": self.ap.StepResult(  # noqa: E731
+            name=name, status="failed", kind=kind)
+        self.assertEqual(self.ap._exit_code_for(mk(self.ap.ErrorKind.ENV)),
+                         self.ap.EXIT_ENV)
+        self.assertEqual(self.ap._exit_code_for(mk(self.ap.ErrorKind.DEP, "deps")),
+                         self.ap.EXIT_DEP)
+        self.assertEqual(
+            self.ap._exit_code_for(mk(self.ap.ErrorKind.LOCK, "deploy")),
+            self.ap.EXIT_DEPLOY_BLOCKED)
+        self.assertEqual(self.ap._exit_code_for(mk(self.ap.ErrorKind.BUILD, "build")),
+                         self.ap.EXIT_FAILED)
+
+
+class TestAutopilotCli(unittest.TestCase):
+    """命令行入口的行为契约（子进程真跑，捕获取消就露不出来）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ap, cls._path = _load_autopilot()
+
+    def _run(self, *args, timeout=180):
+        p = subprocess.run([sys.executable, str(self._path), *args],
+                           cwd=str(self._path.parent),
+                           capture_output=True, errors="replace",
+                           encoding="utf-8", timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+    def test_missing_argument_is_rejected_with_hint(self):
+        """步骤名写错时必须返回「参数错误」专用码（2），且提示合法取值。
+
+        CI 就是靠退出码区分「配置写错」和「测试不过」的 —— 都返回 1 会让
+        排查方向完全跑偏。
+        """
+        rc, out = self._run("--only", "definitely-not-a-step")
+        self.assertEqual(rc, 2, f"应返回参数错误码 2，实际 {rc}\n{out[-600:]}")
+        self.assertIn("definitely-not-a-step", out)
+        self.assertIn("env", out, "应把合法步骤名列出来")
+
+    def test_quiet_mode_suppresses_progress_but_keeps_verdict(self):
+        """`--quiet` 只该压掉过程噪音，结论行必须留着（日志分析全靠它）。"""
+        rc, out = self._run("--only", "env", "--quiet", "--unattended")
+        self.assertEqual(rc, 0, f"rc={rc}\n{out[-800:]}")
+        self.assertIn("结论", out, "quiet 模式也必须输出结论行")
+        self.assertLess(len(out.splitlines()), 30, "quiet 模式行数过多，没真正安静")
+
+
+class TestRunnerEntrypoints(unittest.TestCase):
+    """`run.sh` / `run.cmd` —— 「一条命令跑完全流程」的入口。
+
+    跨平台入口最难测也最容易坏：**开发机器上永远是好的**。
+    真出事的地方是「从别的目录调用」「路径含空格」「换台机器换了 Python 安装方式」，
+    所以这里刻意用不同调用姿势去跑，而不是只测一次 `./run.sh`。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._repo = Path(__file__).resolve().parent.parent
+        cls._sh = cls._repo / "run.sh"
+        cls._cmd = cls._repo / "run.cmd"
+        if not cls._sh.is_file() and not cls._cmd.is_file():
+            raise unittest.SkipTest("未找到 run.sh / run.cmd")
+
+    # ---------- run.cmd（Windows） ----------
+
+    def test_cmd_script_is_pure_ascii(self):
+        """`run.cmd` 必须**全 ASCII**。
+
+        cmd.exe 解析 .cmd/.bat 用的是 **OEM 代码页**（中文 Windows = 936/GBK），
+        不是 UTF-8。文件里一旦有中文注释，cmd 会按 GBK 把字节流拆错，
+        报出 `'�?rem' 不是内部或外部命令` 这种完全指不到根因的错误 —— 
+        实测直接把整份脚本跑崩（rc=255）。
+        """
+        if not self._cmd.is_file():
+            self.skipTest("无 run.cmd（非 Windows 布局）")
+        raw = self._cmd.read_bytes()
+        bad = [(i, b) for i, b in enumerate(raw) if b > 0x7F]
+        if bad:
+            line = raw[:bad[0][0]].count(b"\n") + 1
+            self.fail(f"run.cmd 第 {line} 行含非 ASCII 字节 {bad[0][1]:#x}；"
+                      "cmd.exe 会按 OEM 代码页解析，导致语法错乱")
+
+    @unittest.skipUnless(os.name == "nt", "run.cmd 仅 Windows 可执行")
+    def test_cmd_runs_and_returns_zero(self):
+        if not self._cmd.is_file():
+            self.skipTest("无 run.cmd")
+        p = subprocess.run(["cmd.exe", "/c", "run.cmd", "--only", "env", "--quiet"],
+                           cwd=str(self._repo), capture_output=True,
+                           errors="replace", encoding="utf-8", timeout=180)
+        out = (p.stdout or "") + (p.stderr or "")
+        self.assertEqual(p.returncode, 0, f"rc={p.returncode}\n{out[-800:]}")
+        self.assertIn("结论", out)
+        self.assertNotIn("请按任意键", out)
+        self.assertNotIn("Press any key", out)
+
+    @unittest.skipUnless(os.name == "nt", "run.cmd 仅 Windows 可执行")
+    def test_cmd_propagates_failure_exit_code(self):
+        """参数错误必须把非 0 退出码透传出去（批处理最容易吞掉 ERRORLEVEL）。"""
+        if not self._cmd.is_file():
+            self.skipTest("无 run.cmd")
+        p = subprocess.run(["cmd.exe", "/c", "run.cmd", "--only", "bogus-step"],
+                           cwd=str(self._repo), capture_output=True,
+                           errors="replace", encoding="utf-8", timeout=180)
+        self.assertNotEqual(p.returncode, 0, "参数错误却返回了成功")
+
+    # ---------- run.sh（POSIX / Git Bash） ----------
+
+    @unittest.skipIf(os.name == "nt" and not shutil.which("sh"),
+                     "无 sh 可用")
+    def test_sh_is_invokable_from_multiple_cwds(self):
+        """不管从哪调用、怎么拼路径，都不能被 MSYS 路径改写污染。
+
+        真实踩过的坑：`pwd -P` 在 Git Bash 里给的是 `/f/ZcodeData/...`，
+        再交给原生 python.exe 时 MSYS 会把它当成「相对路径」二次转换，
+        最终变成 `F:\\f\\ZcodeData\\...` —— 一个**看起来像路径、其实不存在**的东西，
+        报错是「找不到 autopilot.py」，和真实原因（路径改写）毫无关系。
+        """
+        if not self._sh.is_file():
+            self.skipTest("无 run.sh")
+        invocations = [
+            ("相对路径 ./run.sh", str(self._repo), ["sh", "./run.sh"]),
+            ("绝对 POSIX 路径", str(self._repo),
+             ["sh", str(self._sh).replace("\\", "/")]),
+            ("从上级目录调用", str(self._repo.parent),
+             ["sh", f"{self._repo.name}/run.sh"]),
+        ]
+        for label, cwd, argv in invocations:
+            with self.subTest(label=label):
+                p = subprocess.run([*argv, "--only", "env", "--quiet"],
+                                   cwd=cwd, capture_output=True,
+                                   errors="replace", encoding="utf-8", timeout=180)
+                out = (p.stdout or "") + (p.stderr or "")
+                self.assertEqual(p.returncode, 0, f"{label}: rc={p.returncode}\n{out[-800:]}")
+                self.assertIn("结论", out, f"{label}: 没有汇总输出")
+                lowered = out.lower()
+                self.assertNotIn("f:\\f\\", lowered,
+                                 f"{label}: 路径被子串转换污染（F:\\f\\...）")
 
 
 if __name__ == "__main__":
