@@ -2428,6 +2428,114 @@ class TestDoctorFlagsStaleInjection(unittest.TestCase):
                       "sync.check_state 与 doctor 都依赖它，必须同步更新")
 
 
+class TestDoctorWatchdogSection(unittest.TestCase):
+    """自检第 7.5 节必须能区分「看护等到了退出」与「看护一直没等到」。
+
+    这是「必须重启两遍才生效」这个现象的唯一直接证据来源。
+    机制上写入发生在**退出**时（`while zcode_running(): sleep(3)` 之后才写 asar），
+    所以第一次「退出」如果不是彻底退出（关窗口只是最小化到托盘，且 ZCode 是多进程，
+    主窗口关了常留渲染/GPU 子进程），`zcode_running()` 就一直为真 → 看护永远不写 →
+    用户必须再来一轮，而第二轮恰好退干净了，补丁才落盘。
+
+    如果自检只报「看护启动 3 次」而不指出「一次都没等到退出」，用户能看到的全部信息就是
+    「我明明重启了却不生效」—— 会误以为是模型配置、缓存或网络问题。
+    """
+
+    def _run_with(self, log_text: str | None):
+        """把 WATCHDOG_LOG 指向临时文件（或不存在），跑第 7.5 节并捕获输出。"""
+        import doctor
+        orig = doctor.WATCHDOG_LOG
+        tmp = Path(tempfile.mkdtemp(prefix="zcode-watchdog-")) / "_apply_after_exit.log"
+        if log_text is not None:
+            tmp.write_text(log_text, encoding="utf-8")
+        doctor.WATCHDOG_LOG = tmp
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                doctor.check_watchdog()
+        finally:
+            doctor.WATCHDOG_LOG = orig
+        return buf.getvalue()
+
+    # 真实场景（本机实测日志）：三次挂看护，一次都没等到退出
+    _NEVER_WOKE = (
+        "[2026-09-23 15:03:55] 看护启动，等待 ZCode 退出…\n"
+        "[2026-09-23 15:23:38] 看护启动，等待 ZCode 退出…\n"
+        "[2026-09-23 15:29:11] 看护启动，等待 ZCode 退出…\n"
+    )
+    # 正常完成：等到了退出、处理完、已重启
+    _COMPLETED = (
+        "[2026-09-23 15:03:55] 看护启动，等待 ZCode 退出…\n"
+        "[2026-09-23 15:04:12] ZCode 已退出（等待 15s），开始处理：应用 --enhance-prompt\n"
+        "[2026-09-23 15:04:20] 处理完成（失败 0 项），重启 ZCode\n"
+        "[2026-09-23 15:04:20] DONE\n"
+    )
+
+    def test_never_woke_watchdog_explains_the_two_restarts(self):
+        out = self._run_with(self._NEVER_WOKE)
+        self.assertIn("从未等到 ZCode 退出", out,
+                      "必须点名「起来了却从未等到退出」——否则用户不知道卡在哪")
+        self.assertIn("重启两遍", out, "要把现象和原因对上：这就是必须重启两遍的原因")
+        self.assertIn("没退出干净", out, "要点出「第一次其实没退出干净」这个真正原因")
+        self.assertIn("tasklist", out, "要给出确认残留进程的命令")
+
+    def test_completed_watchdog_does_not_warn(self):
+        """对照组：正常完成过写入时不能报「从未等到退出」，否则用户会去白折腾退出流程。"""
+        out = self._run_with(self._COMPLETED)
+        self.assertNotIn("从未等到 ZCode 退出", out)
+        self.assertIn("正常完成过写入", out)
+
+    def test_missing_log_is_not_an_error(self):
+        """没有看护日志属正常（无待办时不挂看护），不该报成故障。"""
+        out = self._run_with(None)
+        self.assertIn("还没挂过看护", out)
+        self.assertNotIn("从未等到 ZCode 退出", out)
+
+    def test_timed_out_watchdog_is_not_counted_as_pending(self):
+        """等 24h 超时放弃的看护已被单独统计，不能重复计成「从未等到退出」而刷屏误导。"""
+        log = ("[2026-09-23 00:00:00] 看护启动，等待 ZCode 退出…\n"
+               "[2026-09-24 00:00:00] 等待超时（24h），放弃\n")
+        out = self._run_with(log)
+        self.assertNotIn("从未等到 ZCode 退出", out)
+        self.assertIn("24h 超时", out)
+
+    def test_relaunch_skipped_is_reported_as_benign(self):
+        """「已再次运行，跳过重启」不影响补丁生效，不能让用户以为出了问题。"""
+        log = self._COMPLETED + "[2026-09-23 15:04:20] 检测到 ZCode 已再次运行，跳过重启\n"
+        out = self._run_with(log)
+        self.assertIn("跳过重启", out)
+        self.assertIn("不影响补丁生效", out)
+
+    def test_section_runs_in_full_doctor(self):
+        """第 7.5 节要被 main() 真正调用 —— 只写函数不接入等于没有。"""
+        src = (Path(__file__).resolve().parent.parent
+               / "skills" / "zcode-tokenspeed" / "scripts" / "doctor.py")
+        text = src.read_text(encoding="utf-8")
+        # 只看 main() 里的调用点（函数定义处也含同名子串，不能拿 index() 全局找）
+        body = text[text.index("def main()"):]
+        self.assertIn("check_heartbeat(dirs)", body)
+        self.assertIn("check_watchdog()", body)
+        # 接入位置：紧跟心跳检查之后（检查顺序即排查顺序）
+        self.assertLess(body.index("check_heartbeat(dirs)"),
+                        body.index("check_watchdog()"))
+        # 而且要在补丁状态之前 —— 先解释「为什么没写进去」，再看「写进去的是什么」
+        self.assertLess(body.index("check_watchdog()"), body.index("check_patches()"))
+
+    def test_watchdog_log_vocabulary_is_pinned(self):
+        """看护的日志措辞是 doctor 与 sync 共同依赖的接口，不能随手改。
+
+        第 7.5 节靠这些子串分类：`看护启动` / `已退出（等待` / `DONE` /
+        `已再次运行` / `等待超时`。apply_after_exit.py 改了措辞 →
+        自检会静默地把所有看护都统计成「启动」而永远不报警。
+        """
+        src = (Path(__file__).resolve().parent.parent
+               / "skills" / "zcode-tokenspeed" / "scripts" / "apply_after_exit.py")
+        text = src.read_text(encoding="utf-8")
+        for phrase in ("看护启动，等待 ZCode 退出", "ZCode 已退出（等待", "DONE",
+                       "已再次运行", "等待超时"):
+            self.assertIn(phrase, text, f"apply_after_exit.py 改变了措辞：{phrase}")
+
+
 class TestPluginHookSpec(unittest.TestCase):
     """`hooks/hooks.json` 必须落在内核那两个 zod schema 的字段表里。
 

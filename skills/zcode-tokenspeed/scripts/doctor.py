@@ -23,6 +23,7 @@ r"""zcode-tokenspeed 安装自检（doctor）——只读，不改任何文件�
   5. 插件配置里的开关有没有被保存过（没保存过 → 同步脚本按设计什么也不做）
   6. hooks/hooks.json 是否存在、命令是否可执行
   7. 钩子到底跑没跑过（_sync.last / _sync.log 心跳与日志）
+  7.5 退出后看护有没有真的等到 ZCode 退出（决定补丁到底写没写进去）
   8. 七项补丁当前在客户端里的实际状态
 
 输出末尾给出「结论」，直接指出卡在哪一环、下一步该做什么。
@@ -41,6 +42,9 @@ HERE = Path(__file__).resolve().parent
 PATCHER = HERE / "zcode_patcher.py"
 LOG = HERE / "_sync.log"
 STAMP = HERE / "_sync.last"
+# 退出后看护的日志（apply_after_exit.py 写）。抽成常量是为了测试能替换它 ——
+# 这一节要断言的正是「看护起来了却没等到退出」这种只体现在日志里的状态。
+WATCHDOG_LOG = HERE / "_apply_after_exit.log"
 
 try:                                   # 控制台编码/窗口安全网（见 _console.py 的说明）
     from _console import no_window_kwargs, safe_stdio
@@ -499,6 +503,64 @@ def check_heartbeat(dirs: list[Path]) -> tuple[bool, dict]:
     return fired, log_info
 
 
+def check_watchdog() -> None:
+    """第 7.5 节：退出后看护的「等 vs 写」状态。
+
+    ★ 这一节是为一个真实困惑加的：用户退出并重启后功能不生效，**必须重启两遍**才行。
+
+    机制的根在于「写入发生在**退出**时，而不是启动时」：
+
+        启动① → 钩子跑 sync → 发现待办 → 挂看护 W（W 进
+                 `while zcode_running(): sleep(3)`）
+        退出   → W 醒来 → 写 app.asar → 主动把 ZCode 重新拉起来
+        启动② → asar 已是新版 → 功能生效 ✓
+
+    所以「两遍」本身是**设计使然**，不是 bug。真正的故障是：
+    **第一次退出没退干净**（残留 ZCode 子进程 / 点了「关闭窗口」最小化到托盘），
+    `zcode_running()` 一直为真 → W 一直等（最长 24h）→ 永远不写 →
+    于是必须再来一遍，而第二遍恰好真的退干净了，才写进去。
+
+    判据只有一处：`_apply_after_exit.log`。
+      * 只有「看护启动，等待 ZCode 退出…」→ W 起来了但**从未等到退出** ← 这就是要抓的
+      * 有「ZCode 已退出（等待 Ns），开始处理」→ 写入了
+      * 有「DONE」→ 写完并已（尝试）重启
+    """
+    hr("7.5 退出后看护（写入时机）")
+    logf = WATCHDOG_LOG
+    if not logf.is_file():
+        print(f"{INFO} 没有看护日志 {logf} —— 说明还没挂过看护（正常：无待办时不挂）")
+        return
+    lines = logf.read_text(encoding="utf-8", errors="replace").splitlines()
+    started = [l for l in lines if "看护启动" in l]
+    woke = [l for l in lines if "已退出（等待" in l]
+    done = [l for l in lines if "DONE" in l]
+    skipped = [l for l in lines if "已再次运行" in l]
+    timed_out = [l for l in lines if "等待超时" in l]
+
+    print(f"{INFO} 看护启动 {len(started)} 次，等到退出 {len(woke)} 次，"
+          f"完成 {len(done)} 次")
+    for ln in lines[-4:]:
+        print(f"        {ln}")
+
+    pending = len(started) - len(woke) - len(timed_out)
+    if pending > 0:
+        print(f"{WARN} 有 {pending} 个看护**起来了却从未等到 ZCode 退出** —— 补丁没写进去。")
+        print("       这就是「必须重启两遍才生效」的直接原因：第一次其实没退出干净。")
+        print("       怎么彻底退出：")
+        print("         · Windows：托盘图标**右键 → 退出**；关窗口只是最小化，进程还在")
+        print("         · 退完在任务管理器里确认 **没有 ZCode.exe 残留**（ZCode 是多进程，")
+        print("           主窗口关了常留渲染/GPU 子进程）")
+        print("         · 或直接跑（只读，会列出所有残留进程）：")
+        print("             tasklist /FI \"IMAGENAME eq ZCode.exe\"")
+    elif done:
+        print(f"{OK} 看护正常完成过写入（最近一次见上）")
+    if skipped:
+        print(f"{INFO} 有 {len(skipped)} 次是「ZCode 已再次运行，跳过重启」——")
+        print("       说明写入完成后客户端已被别的原因拉起，不影响补丁生效。")
+    if timed_out:
+        print(f"{WARN} 有 {len(timed_out)} 次等待 24h 超时放弃。")
+
+
 def _zcode_log_dir() -> Path | None:
     """ZCode 的 jsonl 日志目录（钩子执行记录在里面）。"""
     for root in _storage_roots():
@@ -736,9 +798,10 @@ def main() -> int:
     has_plugin, dirs, enabled = check_plugin()
     saved = check_options()
     hook_ok = check_hook(dirs)
-    fired, log_info = check_heartbeat(dirs)
+    hooked, log_info = check_heartbeat(dirs)
+    check_watchdog()
     check_patches()
-    verdict(py_ok, zcode_ok, has_plugin, enabled, saved, hook_ok, fired, log_info)
+    verdict(py_ok, zcode_ok, has_plugin, enabled, saved, hook_ok, hooked, log_info)
     print()
     return 0
 

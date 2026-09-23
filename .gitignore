@@ -2,6 +2,8 @@
 _sync.log
 _sync.last
 _watchdog.pid
+_apply_after_exit.log
+apply_after_exit.log
 __pycache__/
 *.py[cod]
 
