@@ -328,6 +328,49 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --revert
 出现异常时，在渲染层 console 里看诊断对象：`window.__ztpsDiag`（状态栏）、
 `window.__zsliderDiag`（滑条）、`window.__zenhanceDiag`（增强提示词）。
 
+### 润色按钮报「Model is unavailable」怎么办
+
+**症状**：本机润色正常，其他电脑点润色报
+`HTTP 400：Upstream request failed: Model is unavailable.`，
+（或反过来，有的机器显示「已用 glm-5.2 增强」并成功）。
+
+**原因**：插件在「界面所选模型 → 配置里的供应商」这一步反查失败时，
+旧版会退化成「拿第一个供应商去试」——**跟你界面上选了什么无关**。
+不同电脑供应商的排列顺序不同，于是有的机器恰好撞对就能用，撞到没配好
+（缺 API Key、或套餐未生效）的供应商就报这个错。
+
+> 这句话来自上游网关的**模型维度**判定（模型不在你的套餐内 / 已下线），
+> **与地区限制、代理无关** —— 地域封锁表现为 403 或连接重置。
+
+**三步解决**：
+
+1. **先诊断**（只读，不消耗额度）：
+
+   ```bash
+   python skills/zcode-tokenspeed/scripts/enhance_doctor.py
+   ```
+
+   看第 3 节的 `how=`：
+   - `ref` = 正常，界面模型被准确识别；
+   - `label` = 退而用显示名反查（能用，但说明界面没给出模型标识）；
+   - `fallback` = **踩坑了**，请求被发给了一个并非你选中的供应商。
+
+2. **加一发真实探测**确认端到端可用（会消耗极少量额度）：
+
+   ```bash
+   python skills/zcode-tokenspeed/scripts/enhance_doctor.py --probe
+   ```
+
+3. **应急自救**（不改代码）：打开 ZCode「设置 → 模型」，
+   把那些 **`apiKey` 为空或套餐未生效的内置供应商**（名字里带 Coding Plan 之类）
+   删掉或补全 Key，让列表里只剩真正能用的供应商。
+
+升级到 **0.5.9+** 后该问题已在客户端侧修掉：解析只会选**真正可用**的供应商，
+失败时给出「该换什么」的建议，并且对限流 / 超时 / 供应商故障做自动退避重试。
+
+> 其他增强提示词的报错：`no-model` = 没有可用候选（按提示补配置）；
+> `no-key` / `no-baseurl` = 命中供应商缺凭据；报「通信桥不可用」= 重跑注入并重启 ZCode。
+
 ---
 
 ## 装了没生效？先跑自检

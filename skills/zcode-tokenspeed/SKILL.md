@@ -37,8 +37,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 界面上的表现都一样是「什么也没发生」。**最常见的卡点是「插件没启用」**。
 钩子是否真的执行过，看 `scripts/_sync.last` 心跳文件；不存在 = 钩子从未被调用。
 
-> **装完即用，不需要打开配置页。** 插件清单里 8 个开关的 `default` 全是 `true`，没保存过配置时
-> `sync.py` 就按这份默认值注入。ZCode 的插件清单**没有「安装时钩子」**——官方规范
+> **装完即用，不需要打开配置页。** 插件清单里 8 个开关的 `default` 全是 `true`，没保存过配置时> `sync.py` 就按这份默认值注入。ZCode 的插件清单**没有「安装时钩子」**——官方规范
 > `plugin-json-spec.md` 原文只允许声明 `skills` / `commands` / `hooks` / `mcpServers`
 > 四类组件（「Optional components: `skills` and `commands` point to directories; `hooks` points to
 > `hooks/hooks.json`; `mcpServers` can point to `.mcp.json` or contain the server configuration」），
@@ -58,7 +57,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 | ④ TPS 状态栏 | 需要 | 需要 |
 | ⑤ 模型拉取按钮 | 需要 | 需要，模板已按 `optionSpecs` 新格式写入 |
 | ⑥ 思考强度滑条 | 需要 | 需要 |
-| ⑦ 增强提示词 | —（新功能） | 需要：按钮经 preload 桥 / main handler 用当前选中的模型调一次补全；提示词模板内置 |
+| ⑦ 增强提示词 | —（新功能） | 需要：按钮经 preload 桥 / main handler 用当前选中的模型调一次补全；提示词模板内置。0.5.9 起解析只选**真正可用**的供应商，并对失败做归因与分类重试（见第七节） |
 
 > **升级会整体覆盖 app.asar**：除 ①（配置侧，写 `provider_config.json`）外，②–⑦ 升级后都需重跑。
 > 其中**重打包级**（④ TPS 状态栏 / ⑤ 模型拉取按钮 / ⑥ 思考强度滑条 / ⑦ 增强提示词）重跑时会按内容比对
@@ -672,3 +671,86 @@ python zcode_patcher.py --thought-slider --slider-src /path/to/zcode-thought-sli
 - 拖拽后原生下拉状态同步变化（入口档名/电量条、`t` 键联动）= fiber 路径生效；console 出现 `[zslider] 档位提交失败` = fiber 与菜单降级均未命中（版本结构大改，需按「原理」重新对锚点）。
 - 激活段不流动 = 生成中判定没命中：先看 `__zsliderCtl.state().thinking`；`__zsliderCtl.setThinking(true)` 能出效果说明动效本身没问题，再查 `document.querySelector("button[aria-label*='停止']")` 确认自动判定（新版本改了 i18n 或按钮结构就要补 `THINK_SELECTORS`）。
 - 入口不出现：先看探针——`document.querySelector('[data-thought][data-thought-levels]')` 是否有值；当前模型未配思考档位时不显示属预期。
+
+## 七、增强提示词：「润色」按钮与跨机「Model is unavailable」
+
+输入框工具栏一键润色草稿（图标 3 态：✦ 待机 / ◌ 增强中 / ↺ 可还原 20s）。
+
+```bash
+python zcode_patcher.py --enhance-prompt            # 注入（renderer 脚本 + index.html + preload 桥 + main IPC）
+python zcode_patcher.py --enhance-prompt --check
+python zcode_patcher.py --enhance-prompt --revert
+```
+
+链路：渲染层按钮 → preload 桥 `window.zcode.enhancePrompt(text, modelValue, modelLabel)`
+→ main handler `zcode:enhance-prompt`（`_ENHANCE_HANDLER`）读 `config.json` 解析供应商 → 直接 POST 补全接口。
+
+### ★ 已知坑：请求打到不相干的供应商上（0.5.9 修复）
+
+**症状**：本机润色正常，别的电脑报
+`HTTP 400：Upstream request failed: Model is unavailable.`，或部分机器显示
+「已用 glm-5.2 增强」却成功。
+
+**根因**：模型解析的兜底档**无视界面选择**——只要 ref / label 两档没命中，
+就把请求发给「第一个带 baseURL 的自定义供应商的首个模型」，且**不校验该供应商是否可用**
+（`apiKey` 为空、`systemDisabledReason` 存在都照样发）。
+不同机器 `provider` 的**插入顺序不同** → 兜底落到不同供应商 → 有的机器撞对了就能用，
+撞到未授权/无 key 的供应商就返回上游的 `Model is unavailable`。
+
+**为什么本机能用纯属巧合**：本机 `provider` 里前面几条是 `builtin:*`（被旧逻辑跳过），
+兜底恰好落到一个有效供应商上。
+
+**修复（0.5.9）**：四档解析全部经 `usable(pp)` 判定（`baseURL` + `apiKey` + 无
+`systemDisabledReason`）；新增 `ref-label` 档；`label` 档放开 `builtin:` 限制；
+兜底只选真正可用的。拿不出可用候选时返回 `code:"no-model"` + 可读原因，不再构造注定失败的请求。
+
+### 错误归因与重试（0.5.9）
+
+`classify(code, status, msg)` 把失败归成
+`model / quota / auth / path / rate / server / timeout / network / bad-request`，
+并回传 `tip`，前端展示成「增强失败：…」+「→ 可执行建议」。
+
+| 类别 | 是否重试 |
+|---|---|
+| `model` / `auth` / `quota` / `bad-request` | **否**，立刻停 |
+| `rate` | 退避 1600ms，原地重试 1 次 |
+| `server` / `timeout` / `network` | 退避 600ms，原地重试 1 次 |
+| `path`(404) | 换候选地址（`/v1` 两种拼法） |
+
+### 排查（只读工具）
+
+```bash
+python "<skill目录>/scripts/enhance_doctor.py"                 # 解析链路体检
+python enhance_doctor.py --probe                               # 加真实连通性探测（耗极少额度）
+python enhance_doctor.py --probe --model-value "builtin:zai-coding-plan/GLM-5.2"
+```
+
+**它逐段复刻 handler 的解析逻辑**，所以「脚本判定用哪个供应商」= 「按钮实际会用哪个」。
+输出含解析路径（`ref`/`label`/`fallback`）、关键字段、请求 URL / `max_tokens`、HTTP 归因。
+退出码 0 = 无阻断，1 = 发现会导致失败的问题。
+
+界面侧自诊断：DevTools（`Ctrl+Shift+I`）里看 `window.__zenhanceDiag`——
+`lastRequest.modelValue`（空 = ref 通道失效）、`modelCandidates`（>1 = 页面有多个模型节点）、
+`lastResult.code`、`hiddenReason`（按钮没挂上时的原因）。
+
+### 排障速查
+
+| 现象 | 处理 |
+|---|---|
+| 报 `Model is unavailable` | ★ 解析落到了错误供应商。跑 `enhance_doctor.py` 看 `how=`；应急办法：设置里删掉/补全那些 `builtin:` 未生效供应商 |
+| 报「通信桥不可用」 | preload 桥缺失；重跑 `--enhance-prompt` 注入后**重启** ZCode |
+| 按钮不出现 | `window.__zenhanceDiag.hiddenReason`；找不到输入框 / 找不到工具栏行 |
+| 报 `no-model` | 没有可用候选（全表缺 key/baseURL 或被禁用），按提示补配置 |
+| 报 `no-key` / `no-baseurl` | 命中供应商缺凭据；`enhance_doctor.py` 第 4 节直接列出 |
+| 本机能用、别人不能 | 典型兜底档差异：对比两台机器的 `enhance_doctor.py` 输出中的 `how` 与 `providerId` |
+
+> 注意 `Upstream request failed` 是 vercel-ai 网关的错误措辞（对应
+> `GatewayModelNotFoundError`），属**模型维度**判定（不在套餐内 / 已下线），
+> **与地区限制、代理无关**。地域封锁表现为 403 或连接重置。
+
+### 连带修复：Windows 瞬时占用写不进补丁
+
+`app.asar` 被杀软/索引器/未释放句柄短暂占用时，裸 `os.replace` 直接
+`WinError 5 拒绝访问`。新增 `_replace_with_retry()`：仅对 `WinError 5 / 32`
+做 0.25→0.5→1→2s 退避（共 5 次），其他错误立即抛出。
+**后续新增任何对 asar / 配置的原子替换都应走它。**

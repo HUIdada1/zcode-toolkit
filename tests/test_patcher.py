@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 # 兼容两种仓库布局：扁平（scripts/）与插件（skills/zcode-tokenspeed/scripts/）
@@ -336,6 +337,79 @@ class TestPrune(TempCase):
         quiet(zp.prune_artifacts, [self.asar], True, True)
         self.assertTrue((self.tmp / "app.asar.tps.bak").exists())
         self.assertTrue((self.tmp / "app.asar.123.tmp").exists())
+
+
+class TestReplaceWithRetry(TempCase):
+    """Windows 上 os.replace 会遇到杀软/索引器的瞬时占用（WinError 5 / 32）。
+
+    实测：ZCode 进程持有 app.asar 读句柄时，裸 os.replace 直接 WinError 5 失败；
+    这个占用可能是另一个进程正在扫描/释放句柄的瞬时状态，短退避即可跨过去。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.dst = self.tmp / "app.asar"
+        self.dst.write_bytes(b"old")
+        self.tmpfile = self.tmp / "app.asar.123.tmp"
+        self.tmpfile.write_bytes(b"new")
+
+    def test_happy_path_replaces(self):
+        zp._replace_with_retry(self.tmpfile, self.dst)
+        self.assertEqual(self.dst.read_bytes(), b"new")
+        self.assertFalse(self.tmpfile.exists())
+
+    def test_retries_through_transient_lock(self):
+        """模拟「先占用、0.6 秒后释放」——裸 os.replace 会失败，带重试必须成功。"""
+        calls = {"n": 0}
+        real = os.replace
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                err = OSError(13, "拒绝访问")
+                err.winerror = 5
+                raise err
+            return real(src, dst)
+
+        with unittest.mock.patch.object(zp.os, "replace", flaky):
+            with unittest.mock.patch.object(zp.time, "sleep", lambda _s: None):
+                zp._replace_with_retry(self.tmpfile, self.dst)
+        self.assertEqual(calls["n"], 3, "应在第 3 次尝试时成功")
+        self.assertEqual(self.dst.read_bytes(), b"new")
+
+    def test_non_lock_errors_are_not_retried(self):
+        """不是占用类的错误（如文件不存在）必须原样抛出，不能白等 5 轮。"""
+        calls = {"n": 0}
+
+        def bad(src, dst):
+            calls["n"] += 1
+            raise FileNotFoundError(2, "No such file")
+
+        with unittest.mock.patch.object(zp.os, "replace", bad):
+            with self.assertRaises(FileNotFoundError):
+                zp._replace_with_retry(self.tmpfile, self.dst)
+        self.assertEqual(calls["n"], 1, "非占用类错误只应尝试一次")
+
+    def test_gives_up_after_max_attempts(self):
+        calls = {"n": 0}
+
+        def always_locked(src, dst):
+            calls["n"] += 1
+            err = OSError(13, "拒绝访问")
+            err.winerror = 5
+            raise err
+
+        with unittest.mock.patch.object(zp.os, "replace", always_locked):
+            with unittest.mock.patch.object(zp.time, "sleep", lambda _s: None):
+                with self.assertRaises(OSError):
+                    zp._replace_with_retry(self.tmpfile, self.dst, attempts=3)
+        self.assertEqual(calls["n"], 3)
+
+    def test_repack_uses_the_retrying_replace(self):
+        """重打包路径必须走 _replace_with_retry，而不是裸 os.replace。"""
+        src = (Path(zp.__file__)).read_text(encoding="utf-8")
+        self.assertIn("_replace_with_retry(tmp, asar)", src)
+        self.assertNotIn("os.replace(tmp, asar)", src)
 
 
 # ------------------------------------------------------------------ 内核补丁（≤3.11）
@@ -655,6 +729,44 @@ class TestGeneratedJs(unittest.TestCase):
         self._check(code)
         self.assertIn("zcode:enhance-prompt", code)
         self.assertIn("chat/completions", code)
+
+    def test_enhance_resolution_never_ships_models_from_disabled_providers(self):
+        """★ 回归：跨机「HTTP 400 Model is unavailable」的根因。
+
+        旧逻辑在 ref 档失败后会直接进兜底档，把请求打给「第一个带 baseURL 的
+        自定义供应商」—— 与界面所选模型无关，且不检查该供应商是否可用
+        （缺 key / 被 systemDisabledReason 禁用），于是 400。
+        新逻辑必须先过 usable()（baseURL + apiKey + 未禁用），
+        拿不出可用候选时返回可读原因，而不是构造一个注定失败的请求。
+        """
+        code = zp._enhance_main_block("j").decode()
+        self.assertIn("function usable(", code, "必须存在可用性判定")
+        self.assertIn("systemDisabledReason", code, "必须排除被系统禁用的供应商")
+        # 三档解析都必须走 cand()/usable()，不能有任何一条绕过判定直接 pick
+        self.assertIn('cand(pid,mid,pp,"ref")', code)
+        self.assertIn('cand(pid,mid,pp,"ref-label")', code)
+        self.assertIn('cand(pid,mid,pp,"label")', code)
+        self.assertIn('cand(pid,mid,pp,"fallback")', code)
+        self.assertNotIn('pick={pid:pid,mid:mid,p:pp};how="fallback"', code,
+                         "兜底档不得绕过可用性判定")
+        # 失败时必须给出原因与轨迹，前端才能做友好提示
+        self.assertIn('code:"no-model"', code)
+        self.assertIn("tried", code)
+
+    def test_enhance_handler_classifies_errors_and_retries_only_retryable(self):
+        """错误必须分类：model/auth/quota 不重试，超时/限流/5xx 才退避重试。"""
+        code = zp._enhance_main_block("j").decode()
+        self.assertIn("function classify(", code)
+        for kind in ('"model"', '"quota"', '"auth"', '"path"', '"rate"', '"server"'):
+            self.assertIn(f"kind:{kind}", code, f"缺少错误分类 {kind}")
+        self.assertIn("if(!cls.retry)break;", code, "不可重试的错误必须立刻停")
+        # 分类命中「模型不可用」的关键词（上游原样透传的英文/中文都要覆盖）
+        self.assertIn("model is unavailable", code)
+        self.assertIn("model_not_found", code)
+        # 返回体要带 tip，前端据此给「可执行的下一步」
+        self.assertIn("tip:fc.tip", code)
+        self.assertRegex(code, r"for\(let cur of cs\)[\s\S]*setTimeout",
+                         "重试前应有退避等待")
 
     def test_main_segment_matches_regenerated(self):
         """注入 → 状态判定 → 再生成，三段必须逐字节一致（否则每次都会白重写）。"""

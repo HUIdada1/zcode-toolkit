@@ -24,7 +24,7 @@
   const BTN_ID = "zcode-enhance-prompt-btn";
   const STYLE_ID = "zenhance-style";
   const diag = (window.__zenhanceDiag = window.__zenhanceDiag || {});
-  diag.scriptVersion = "1.1";
+  diag.scriptVersion = "1.2";
 
   const TIP_IDLE = "增强提示词";
   const TIP_BUSY = "增强中…";
@@ -146,14 +146,24 @@
   }
 
   /** 当前选中的模型：优先读模型按钮上的 data-model-current-value（形如 providerId/modelId），
-   *  读不到就退化为该按钮的显示文案（主进程会按 modelId / name 反查配置）。 */
+   *  读不到就退化为该按钮的显示文案（主进程会按 modelId / name 反查配置）。
+   *  注意：同一页面可能有多个带该属性的节点（弹窗、工作流设置面板等），必须挑
+   *  **可见的、最靠下的**那个 —— 否则会把后台面板里的模型当成本会话选的模型，
+   *  这正是「本机能润色、别人报 Model is unavailable」的一个直接来源。 */
   function currentModel() {
     let value = "", label = "";
     try {
-      const el = document.querySelector("[data-model-current-value]");
-      if (el) {
+      const all = Array.from(document.querySelectorAll("[data-model-current-value]"));
+      if (all.length) {
+        const vis = all.filter((e) => e.offsetParent != null);
+        const pool = vis.length ? vis : all;
+        pool.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+        const el = pool[0];
         value = String(el.getAttribute("data-model-current-value") || "").trim();
-        label = String(el.textContent || "").trim();
+        // 显示名取该节点里最长的可见文本（模型名 + 可能的连接方式后缀）
+        const t = String(el.textContent || "").replace(/\s+/g, " ").trim();
+        label = t;
+        diag.modelCandidates = all.length;
       }
     } catch (err) { /* ignore */ }
     return { value, label };
@@ -212,7 +222,14 @@
         ? { model: res.model, provider: res.provider, how: res.how, chars: String(res.text || "").length }
         : { code: (res && res.code) || "unknown", error: String((res && res.error) || "未知错误") };
       if (!res || !res.success) {
-        toast("增强失败：" + String((res && res.error) || "未知错误"), 5200);
+        // 「模型不可用」是配置问题，不是网络问题 —— 给出可执行的下一步，而不是甩一个 HTTP 400
+        const tip = String((res && res.tip) || "");
+        const head = "增强失败：" + String((res && res.error) || "未知错误");
+        const body = tip ? ("\n→ " + tip) : "";
+        toast(head + body, tip ? 9000 : 5200);
+        if (res && (res.code === "model" || res.code === "auth" || res.code === "no-model")) {
+          console.warn("[zcode-enhance] 配置类失败", res);
+        }
         return;
       }
       const enhanced = String(res.text || "").trim();

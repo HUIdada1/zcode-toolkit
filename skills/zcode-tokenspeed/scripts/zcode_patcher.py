@@ -1432,32 +1432,57 @@ if(!text)return{success:!1,code:"empty",error:"输入框是空的"};
 let prov=cfg.provider||{};
 let mv=String((t&&t.modelValue)||"").trim();
 let ml=String((t&&t.modelLabel)||"").trim().toLowerCase();
-let pick=null,how="";
+let pick=null,how="",tried=[];
+// 候选必须「自带 key + 自带 baseURL + 未被系统禁用」——否则必然是 400/401
+function usable(pp){
+if(!pp||typeof pp!="object")return!1;
+if(pp.systemDisabledReason)return!1;
+let o=pp.options||{};
+return !!String(o.baseURL||"").trim()&&!!String(o.apiKey||"").trim()}
+function cand(pid,mid,pp,n){
+let u=String((pp.options||{}).baseURL||"").replace(/\\/+$/,"");
+tried.push(n+":"+pid+"/"+mid+(usable(pp)?"":"(跳过:不可用)"));
+if(!usable(pp))return null;
+return{pid:pid,mid:mid,p:pp,how:n}}
 // ① 界面直接给的 ref（providerId/modelId）——最准
 if(mv){let k=mv.indexOf("/");
-if(k>0){let pid=mv.slice(0,k),mid=mv.slice(k+1);
-let pp=prov[pid];
-if(pp&&pp.models&&pp.models[mid]){pick={pid:pid,mid:mid,p:pp};how="ref"}}}
-// ② 界面上的模型显示名 → 在配置里按 modelId / name 反查
+if(k>0){let pid=mv.slice(0,k),mid=mv.slice(k+1),pp=prov[pid];
+if(pp&&pp.models&&pp.models[mid]){let c=cand(pid,mid,pp,"ref");if(c)pick=c}}}
+// ② 按 ref 的 providerId + 界面显示名，在该供应商内部定位模型
+//    （ref 里的 modelId 与配置键不一致时，这一档能救回来）
+if(!pick&&mv&&ml){let k=mv.indexOf("/");
+if(k>0){let pid=mv.slice(0,k),pp=prov[pid];
+if(pp&&pp.models){for(let mid of Object.keys(pp.models||{})){
+let mm=pp.models[mid]||{};
+let names=[mid,mm.name,pid+"/"+mid];
+for(let c2 of names){
+if(c2&&String(c2).trim().toLowerCase()===ml){let c=cand(pid,mid,pp,"ref-label");if(c)pick=c;break}}
+if(pick)break}}}}
+// ③ 全表按显示名反查（不限自定义：内置供应商只要能读到 key 也应该能用）
 if(!pick&&ml){
 for(let ent of Object.entries(prov)){
 let pid=ent[0],pp=ent[1];
-if(!pp||typeof pp!="object"||String(pid).startsWith("builtin:"))continue;
+if(!pp||typeof pp!="object")continue;
 for(let mid of Object.keys(pp.models||{})){
 let mm=pp.models[mid]||{};
 let names=[mid,mm.name,pid+"/"+mid];
-for(let cand of names){
-if(cand&&String(cand).trim().toLowerCase()===ml){pick={pid:pid,mid:mid,p:pp};how="label";break}}
+for(let c3 of names){
+if(c3&&String(c3).trim().toLowerCase()===ml){let c=cand(pid,mid,pp,"label");if(c)pick=c;break}}
 if(pick)break}
 if(pick)break}}
-// ③ 兜底：第一个带 Base URL 的自定义供应商的首个模型
+// ④ 末档兜底：界面没给出任何可用线索时，才用第一个真正可用的供应商
 if(!pick){
 for(let ent of Object.entries(prov)){
 let pid=ent[0],pp=ent[1];
 if(!pp||typeof pp!="object"||String(pid).startsWith("builtin:"))continue;
 let mid=Object.keys(pp.models||{})[0];
-if(mid&&pp.options&&pp.options.baseURL){pick={pid:pid,mid:mid,p:pp};how="fallback";break}}}
-if(!pick)return{success:!1,code:"no-model",error:"没有可用的模型：请先在设置里配置供应商与 API Key"};
+if(!mid)continue;
+let c=cand(pid,mid,pp,"fallback");if(c){pick=c;break}}}
+if(!pick){
+let why=String((t&&t.modelValue)||"").trim()||ml;
+return{success:!1,code:"no-model",error:why
+?("界面所选模型「"+why+"」不可用：它所属的供应商缺少 API Key / Base URL，或套餐未生效（"+(tried.slice(0,3).join("; ")||"无候选")+"）。请在设置里换一个已配置好的模型，或补全该供应商的凭据")
+:"没有可用的模型：请先在设置里配置供应商与 API Key"}}
 let u=String(pick.p.options.baseURL||"").replace(/\\/+$/,"");
 let k=String(pick.p.options.apiKey||"");
 if(!u)return{success:!1,code:"no-baseurl",error:"供应商「"+pick.pid+"」没有填 Base URL"};
@@ -1476,7 +1501,25 @@ cs.push(u+"/chat/completions");
 body={model:pick.mid,stream:!1,temperature:0.3,max_tokens:2048,
 messages:[{role:"system",content:sys},{role:"user",content:user}]}}
 let payload=JSON.stringify(body);
-let lastErr="";
+// —— 错误分类 + 重试策略 ——
+// retryable: 换地址重试 / 退避重试有意义（网络抖动、超时、限流、供应商 5xx）
+// permanent: 请求本身或账号的问题，重试无意义，但要做「友好归因」
+function classify(code,status,msg){
+let m=String(msg||"").toLowerCase();
+if(/model is unavailable|model_not_found|not found|unknown model|no such model|not available/.test(m))
+return{kind:"model",retry:!1,tip:"界面所选模型在该供应商处不存在或未开通。请检查模型名称与套餐，或在设置里换一个模型"};
+if(/insufficient|balance|quota|exceeded|充值|余额/.test(m))
+return{kind:"quota",retry:!1,tip:"额度或余额不足，请充值或切换供应商"};
+if(/invalid[_ ]?api[_ ]?key|unauthorized|authentication|token|鉴权|令牌/.test(m)||status===401||status===403)
+return{kind:"auth",retry:!1,tip:"API Key 无效、过期或无权限（注意密钥可能必须来自该 endpoint 的同源账号）"};
+if(status===404)return{kind:"path",retry:!0,tip:"接口路径可能不对（baseURL 是否需要 /v1）"};
+if(status===429)return{kind:"rate",retry:!0,tip:"触发限流，稍后重试即可"};
+if(status>=500)return{kind:"server",retry:!0,tip:"供应商侧故障，稍后重试"};
+if(status===400)return{kind:"bad-request",retry:!1,tip:"请求被上游拒绝（模型名称/参数/协议类型不匹配）"};
+if(code==="timeout")return{kind:"timeout",retry:!0,tip:"网络超时，请检查代理或稍后重试"};
+if(code==="network")return{kind:"network",retry:!0,tip:"无法连接供应商，请检查网络与代理设置"};
+return{kind:"other",retry:!!(code!=="http"),tip:""}}
+let lastRes=null,lastErr="";
 for(let cur of cs){
 let mod=cur.indexOf("https:")===0?httpsMod:httpMod;
 if(!mod){lastErr="无法加载 Node HTTP 模块";continue}
@@ -1500,12 +1543,31 @@ req.on("error",err=>resolve({success:!1,code:"network",error:"请求失败："+S
 req.on("timeout",()=>{req.destroy();resolve({success:!1,code:"timeout",error:"请求超时（60 秒）"})});
 req.write(payload);req.end()});
 if(res&&res.success)return res;
-lastErr=(res&&res.error)||lastErr;
-// 4xx（除 429）是请求本身的问题，换地址重试也没用，直接返回
-if(res&&res.code==="http"&&res.status>=400&&res.status<500&&res.status!==429)return res;
+lastRes=res;lastErr=(res&&res.error)||lastErr;
+let cls=classify(res&&res.code,res&&res.status,res&&res.error);
+if(!cls.retry)break;                                  // 不可重试：立刻停，换地址也没用
+if(cur!==cs[cs.length-1])continue;                     // 还有候选地址：先换地址
+if(cls.kind==="rate"||cls.kind==="server"||cls.kind==="timeout"||cls.kind==="network"){
+await new Promise(z=>setTimeout(z,cls.kind==="rate"?1600:600));
+let res2=await new Promise(resolve=>{                 // 原地重试一次
+let req=mod.request(cur,{method:"POST",headers:Object.assign({},headers,{"Content-Length":Buffer.byteLength(payload)}),timeout:60000},r2=>{
+let b="";r2.on("data",c=>b+=c);
+r2.on("end",()=>{let msg="";
+try{let j=JSON.parse(b);msg=(j&&(j.error&&(j.error.message||j.error)||j.message))||""}catch(_){msg=b.slice(0,200)}
+resolve({success:!1,code:"http",status:r2.statusCode,error:"HTTP "+r2.statusCode+(msg?("："+String(msg)):"")})})});
+req.on("error",err=>resolve({success:!1,code:"network",error:"请求失败："+String(err&&err.message||err)}));
+req.on("timeout",()=>{req.destroy();resolve({success:!1,code:"timeout",error:"请求超时（60 秒）"})});
+req.write(payload);req.end()});
+if(res2){lastRes=res2;lastErr=res2.error||lastErr}}
 }
-return{success:!1,code:"unreachable",error:lastErr||("未能连通 "+u+"，请检查供应商地址与协议类型")};
-}catch(err2){return{success:!1,code:"exception",error:"增强失败："+String(err2&&err2.message||err2)}}});
+// 向上层交出「机器可读 code + 可读 error + 可执行 tip」，前端据此做友好提示
+let fin=lastRes||{code:"unreachable",error:lastErr||("未能连通 "+u+"，请检查供应商地址与协议类型")};
+let fc=classify(fin.code,fin.status,fin.error);
+// 「模型不可用」这类错误，直接把原因与建议说清楚，别再让用户面对 HTTP 400
+return{success:!1,code:fc.kind||fin.code||"error",status:fin.status,
+error:fin.error||"增强失败",tip:fc.tip||"请检查模型与供应商配置",
+provider:pick.pid,model:pick.mid,tried:tried.slice(0,4)};
+}catch(err2){return{success:!1,code:"exception",error:"增强失败："+String(err2&&err2.message||err2),tip:"内部异常，请把这条信息反馈给插件作者"}}});
 '''
 
 
@@ -1553,6 +1615,25 @@ def _asar_walk_entries(node, path=""):
             yield from _asar_walk_entries(ent, p)
         elif not ent.get("unpacked"):
             yield p, ent
+
+
+def _replace_with_retry(tmp: Path, dst: Path, attempts: int = 5) -> None:
+    """os.replace，遇到 Windows 瞬时占用时退避重试。
+
+    WinError 5（拒绝访问）与 WinError 32（正被占用）在 Windows 上极常见：
+    刚被别的进程读过的文件、杀软正在扫描的文件，句柄释放有几毫秒到几秒延迟。
+    只做短退避重试，不做长等待 —— 真正的「ZCode 还在运行」由上层运行守卫拦截。
+    """
+    delay = 0.25
+    for i in range(attempts):
+        try:
+            os.replace(tmp, dst)
+            return
+        except OSError as e:
+            if getattr(e, "winerror", None) not in (5, 32) or i == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 4.0)
 
 
 def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> int:
@@ -1657,7 +1738,7 @@ def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> i
                 f.seek(v_start + int(ent["offset"]))
                 if f.read(len(want)) != want:
                     raise ValueError(f"重打包校验失败（内容不符）: {p}")
-        os.replace(tmp, asar)
+        _replace_with_retry(tmp, asar)
     except BaseException:
         tmp.unlink(missing_ok=True)   # 失败/被占用都不留临时文件残留
         raise
