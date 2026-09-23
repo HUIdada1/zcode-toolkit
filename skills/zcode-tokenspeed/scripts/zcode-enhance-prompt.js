@@ -186,25 +186,35 @@
     }
   }
 
-  /** 当前选中的模型：优先读模型按钮上的 data-model-current-value（形如 providerId/modelId），
-   *  读不到就退化为该按钮的显示文案（主进程会按 modelId / name 反查配置）。
-   *  注意：同一页面可能有多个带该属性的节点（弹窗、工作流设置面板等），必须挑
-   *  **可见的、最靠下的**那个 —— 否则会把后台面板里的模型当成本会话选的模型，
-   *  这正是「本机能润色、别人报 Model is unavailable」的一个直接来源。 */
+  /** 当前选中的模型：模型按钮就挂在 composer 工具栏上，因此先锚定 dock 再找
+   *  [data-model-current-value]（形如 providerId/modelId）。
+   *  ★ 修复：旧实现全局搜 + 「最靠下」启发式会稳定失灵——输入框工具栏位于
+   *  fixed 定位容器内，offsetParent 恒为 null 被「可见过滤」整批误杀；而后台
+   *  残留的设置/工作流面板节点反而「更靠下」被取走（或整池为空），于是
+   *  mv/ml 恒为空 → 主进程四档解析全空 → 掉进兜底档，把请求发给供应商表里
+   *  第一个可用供应商的第一个模型。典型表现：报错里的模型不是你选的那个。 */
   function currentModel() {
     let value = "", label = "";
     try {
-      const all = Array.from(document.querySelectorAll("[data-model-current-value]"));
-      if (all.length) {
-        const vis = all.filter((e) => e.offsetParent != null);
-        const pool = vis.length ? vis : all;
-        pool.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
-        const el = pool[0];
+      const dock = findDock();
+      let pool = [];
+      if (dock) pool = Array.from(dock.querySelectorAll("[data-model-current-value]"));
+      if (!pool.length) {
+        // dock 内没有（极端布局）才退回全局，但排除工作流运行设置等面板的残留节点
+        pool = Array.from(document.querySelectorAll("[data-model-current-value]"))
+          .filter((e) => !e.closest("[data-testid='workflow-run-settings-model']"));
+      }
+      if (pool.length) {
+        const vis = pool.filter((e) => e.offsetParent != null);
+        // dock 命中时不再因 offsetParent=null 丢弃：fixed 容器里该属性本就恒为 null
+        const usablePool = (dock && pool.length) ? pool : (vis.length ? vis : pool);
+        usablePool.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+        const el = usablePool[0];
         value = String(el.getAttribute("data-model-current-value") || "").trim();
         // 显示名取该节点里最长的可见文本（模型名 + 可能的连接方式后缀）
         const t = String(el.textContent || "").replace(/\s+/g, " ").trim();
         label = t;
-        diag.modelCandidates = all.length;
+        diag.modelCandidates = pool.length;
       }
     } catch (err) { /* ignore */ }
     return { value, label };

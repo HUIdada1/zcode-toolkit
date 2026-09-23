@@ -1437,6 +1437,9 @@ let root=r.join(base,".zcode","v2");
 // 因此这里先把 provider_config.json 归一化成统一的候选表，必要时再用 config.json 补缺。
 // ============================================================
 function rd(p){try{return JSON.parse(n.readFileSync(p,"utf-8"))}catch(_){return null}}
+// ⓪ 增强专用热配置 <root>/enhance_config.json：每次点击都重新读取，改文件即生效、无需重启。
+//   providerId/modelId 留空或文件不存在时，行为与旧版完全一致（用界面当前选中的模型）。
+let cfg=rd(r.join(root,"enhance_config.json"))||{};
 let srcTried=[];
 // ① provider_config.json（权威）→ 归一化
 let pcCands=[];
@@ -1494,6 +1497,13 @@ function cand(pid,mid,n){
 tried.push(n+":"+pid+"/"+mid+(usable((byId[pid]||{}).p)?"":"(跳过:不可用)"));
 if(!byId[pid]||!usable(byId[pid].p))return null;
 return{pid:pid,mid:mid,p:byId[pid].p,how:n,name:(byId[pid].name||"")}}
+// ⓪ 用户在 enhance_config.json 里显式指定的供应商+模型 —— 最高优先级。
+//    只要求供应商可用（key/baseURL 齐全），不校验模型表：允许发表里没有、
+//    但中转站实际支持的模型名（也是自定义思考强度模型变体的入口）。
+if(cfg&&String(cfg.providerId||"").trim()&&String(cfg.modelId||"").trim()){
+let cpid=String(cfg.providerId).trim(),cmid=String(cfg.modelId).trim();
+let cp=byId[cpid];
+if(cp&&usable(cp.p)){pick=cand(cpid,cmid,"config")}}
 // ① 界面直接给的 ref（providerId/modelId）——最准
 if(mv){let k=mv.indexOf("/");
 if(k>0){let pid=mv.slice(0,k),mid=mv.slice(k+1);
@@ -1545,23 +1555,32 @@ let kind=String(pick.p.kind||"openai-compatible");
 let sys=__SYS__,tpl=__TPL__;
 let user=tpl.split("{input}").join(text);
 let cs=[],body;
+// 热配置参数：maxTokens / temperature / 思考强度（reasoningEffort 或 thinkingBudget）
+let cfgMax=Math.max(256,Number(cfg.maxTokens)||2048);
+let cfgTemp=(cfg.temperature==null||isNaN(Number(cfg.temperature)))?0.3:Number(cfg.temperature);
+let re=String(cfg.reasoningEffort||"").trim().toLowerCase();
+let tb=Number(cfg.thinkingBudget)||0;
 let headers={"Content-Type":"application/json","Accept":"application/json",Authorization:"Bearer "+k,"x-api-key":k};
 if(kind==="anthropic"){
 cs.push((u.endsWith("/v1")?u:u+"/v1")+"/messages");
-body={model:pick.mid,max_tokens:2048,system:sys,messages:[{role:"user",content:user}]}}
+body={model:pick.mid,max_tokens:cfgMax,system:sys,messages:[{role:"user",content:user}]};
+if(re||tb>0){let budget=Math.max(1024,Math.min(32768,tb||8192));
+body.thinking={type:"enabled",budget_tokens:budget};
+body.max_tokens=Math.max(cfgMax,budget+1024)}}
 else{
 cs.push((u.endsWith("/v1")?u:u+"/v1")+"/chat/completions");
 cs.push(u+"/chat/completions");
-body={model:pick.mid,stream:!1,temperature:0.3,max_tokens:2048,
-messages:[{role:"system",content:sys},{role:"user",content:user}]}}
+body={model:pick.mid,stream:!1,temperature:cfgTemp,max_tokens:cfgMax,
+messages:[{role:"system",content:sys},{role:"user",content:user}]};
+if(re)body.reasoning_effort=re}
 let payload=JSON.stringify(body);
 // —— 错误分类 + 重试策略 ——
 // retryable: 换地址重试 / 退避重试有意义（网络抖动、超时、限流、供应商 5xx）
 // permanent: 请求本身或账号的问题，重试无意义，但要做「友好归因」
 function classify(code,status,msg){
 let m=String(msg||"").toLowerCase();
-if(/model is unavailable|model_not_found|not found|unknown model|no such model|not available/.test(m))
-return{kind:"model",retry:!1,tip:"界面所选模型在该供应商处不存在或未开通。请检查模型名称与套餐，或在设置里换一个模型"};
+if(/model is unavailable|model_not_found|not found|unknown model|no such model|not available|not supported/.test(m))
+return{kind:"model",retry:!1,tip:"该供应商不支持此模型或未开通（实测可用 enhance_config.json 指定其它供应商/模型）。请检查模型名称与套餐，或换一个供应商"};
 if(/insufficient|balance|quota|exceeded|充值|余额/.test(m))
 return{kind:"quota",retry:!1,tip:"额度或余额不足，请充值或切换供应商"};
 if(/invalid[_ ]?api[_ ]?key|unauthorized|authentication|token|鉴权|令牌/.test(m)||status===401||status===403)
