@@ -841,6 +841,8 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --reasoning-config
 
 ```
 marketplace.json                              插件市场清单（ZCode「添加插件市场」读它）
+assets/icon.png                               插件图标（256×256 PNG，市场/插件详情页展示）
+assets/banner.png                             仓库 README 顶部横幅
 .zcode-plugin/plugin.json                     插件清单（含 8 个功能开关的声明）
 bootstrap.py                                  跨平台引导：自检 + 依赖检查 + 构建 + 测试 + 状态
 autopilot.py                                  全自动流水线：装依赖 → 构建 → 测试 → 部署 → 验证
@@ -905,6 +907,36 @@ CI（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 / 3.13 上跑这套用�
 
 1. 改 `.zcode-plugin/plugin.json` 的 `version`；
 2. **同步改根目录 `marketplace.json` 里该插件条目的 `version`**。
+
+### 插件图标
+
+图标文件是 `assets/icon.png`，由**根目录 `marketplace.json` 的插件条目**通过 `icon` 字段引用：
+
+```json
+{
+  "name": "zcode-tokenspeed",
+  "version": "0.6.3",
+  "icon": "./assets/icon.png",
+  ...
+}
+```
+
+图标规格（与官方 `icon-sources.json` 的 `normalization` 约定一致）：
+
+| 项 | 要求 |
+|---|---|
+| 格式 | **PNG**（客户端只接受 `.png`） |
+| 尺寸 | 256×256 |
+| 色彩 | RGBA，透明背景 |
+| 留白 | 内容等比缩放后居中，四周留出安全边距（本图标内容约 168×168） |
+
+图案含义：紫靛渐变圆角底板 + 两张错位的「令牌卡片」（token 累加）+ 右下角实心闪电徽章
+（加速 / **tokens per second**）。刻意做成大块面、高对比，缩到 16px 仍可辨认。
+
+> **注意**：`icon` 是**市场清单**字段，不写进 `.zcode-plugin/plugin.json`。
+> 客户端在解析市场清单时会显式剥离插件清单里的 `icon` / `category` / `heroImage` 等展示字段，
+> 只保留 `icon` 出现在 `marketplace.json` 的 `listing` 里才生效。
+> 改完图标后需要 `plugins marketplace update <市场名>` 让缓存刷新，再重装/更新插件。
 
 ### 代码审查与修复记录
 
