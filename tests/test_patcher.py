@@ -1018,6 +1018,56 @@ class TestCheckStateWording(unittest.TestCase):
         self.assertEqual(self._state("完全看不懂的输出"), "unknown")
 
 
+class TestProcessProbeDecodesSafely(unittest.TestCase):
+    """进程探测器必须能同时接住 subprocess 返回的 str 和 bytes。
+
+    为什么值得钉死：`_from_running_processes` 用 `errors="replace"` 调 subprocess ——
+    这个参数会让 subprocess **直接把输出解码成 str**。而原实现写的是
+    `out = subprocess.run(...).stdout or b""` 再 `out.decode(...)`，对 str 调 `.decode()`
+    必然抛 `AttributeError`；偏偏外层是 `except Exception: return`，异常被静默吞掉，
+    于是探测器**永远命中 0 个候选目录**。
+
+    这个 bug 极难发现：注册表/常见目录两条探测器还在工作，功能「看起来是好的」，
+    只是丢掉了最准的那条线索（用户实际在跑哪个安装）。本机因为注册表恰好命中，
+    完全看不出来。所以这里直接用假数据喂进去，把「str 也要能处理」钉下来。
+    """
+
+    def _run_probe(self, stdout_value):
+        import zcode_patcher as zp
+
+        class _FakeProc:
+            def __init__(self, out):
+                self.stdout = out
+
+        fake = _FakeProc(stdout_value)
+        orig_run, orig_nt = zp.subprocess.run, zp.os.name
+        zp.subprocess.run = lambda *a, **k: fake
+        zp.os.name = "nt"
+        try:
+            found: list = []
+            zp._from_running_processes(found)
+            return found
+        finally:
+            zp.subprocess.run, zp.os.name = orig_run, orig_nt
+
+    def test_handles_str_stdout(self):
+        """errors="replace" 时 subprocess 给的就是 str —— 必须能解析出安装目录。"""
+        lines = "C:\\WINDOWS\\system32\\ApplicationFrameHost.exe\r\nD:\\ZCode\\ZCode.exe\r\n"
+        found = self._run_probe(lines)
+        self.assertEqual([p.name for p in found], ["ZCode"],
+                         f"str 输出没被解析出来（很可能又是 .decode() 抛异常被吞了）：{found}")
+
+    def test_handles_bytes_stdout(self):
+        """没传 errors 时仍是 bytes —— 老路径也不能回归。"""
+        lines = b"D:\\ZCode\\ZCode.exe\r\nC:\\Other\\notepad.exe\r\n"
+        found = self._run_probe(lines)
+        self.assertEqual([p.name for p in found], ["ZCode"])
+
+    def test_non_zcode_paths_are_ignored(self):
+        found = self._run_probe("C:\\WINDOWS\\explorer.exe\n/usr/bin/python\n")
+        self.assertEqual(found, [])
+
+
 class TestNoConsoleWindowFlags(unittest.TestCase):
     """每个会起 console 子进程的调用都必须带「别弹控制台窗口」的标志。
 
@@ -2281,6 +2331,188 @@ class TestPluginHookSpec(unittest.TestCase):
             self.assertIn("python3", h["command"], f"{path} 缺少 python3 兜底")
             self.assertIn("CLAUDE_PLUGIN_ROOT", h["command"],
                           f"{path} 应该用 ${{CLAUDE_PLUGIN_ROOT}} 定位脚本，不要写死路径")
+
+
+# ------------------------------------------------------- bootstrap.py（引导脚本）
+
+class TestBootstrapScript(unittest.TestCase):
+    """`bootstrap.py` 声称「Windows / macOS / Linux 都能直接运行、不含任何本机绝对路径」。
+
+    这类声明最容易静默失效：开发者在自己的机器上跑一次看到绿字，就把
+    `D:\\ZCode` 或 `C:\\Users\\xxx` 留在了源码里；换台机器表现是「莫名其妙找不到文件」。
+    所以这里**不靠人眼 review**，而是把声明逐条钉成断言。
+    """
+
+    _repo = None
+
+    @classmethod
+    def setUpClass(cls):
+        # 仓库根：tests/ 的上一级
+        cls._repo = Path(__file__).resolve().parent.parent
+        cls._src_path = cls._repo / "bootstrap.py"
+        if not cls._src_path.is_file():
+            raise unittest.SkipTest("未找到 bootstrap.py")
+        cls._src = cls._src_path.read_text(encoding="utf-8")
+
+    # ---------- 1. 无硬编码本机路径 ----------
+
+    def test_source_has_no_machine_specific_absolute_paths(self):
+        """源码里不得出现任何本机绝对路径字面量。
+
+        这是脚本最核心的承诺：换台电脑、换个用户名、装在别的盘也照样能跑。
+        """
+        # 注意：这里刻意列「本机真实路径」而不是泛化的正则，命中即说明真的写死了。
+        banned = [
+            "D:\\ZCode", "D:/ZCode",
+            "C:\\Users\\80361", "C:/Users/80361",
+            "F:\\ZcodeData", "F:/ZcodeData",
+            "F:\\WorkBuddyAI", "F:/WorkBuddyAI",
+            ".workbuddy-ai/binaries",
+            "ZcodeData",
+        ]
+        hits = [b for b in banned if b in self._src]
+        self.assertEqual(hits, [], f"bootstrap.py 写死了本机路径：{hits}")
+
+    def test_repo_root_is_derived_from_dunder_file(self):
+        """仓库根必须由 `__file__` 推导 —— 这样脚本放哪、从哪调用都对。"""
+        self.assertIn("Path(__file__).resolve().parent", self._src,
+                      "仓库根应该用 Path(__file__).resolve().parent 推导")
+
+    # ---------- 2. 可执行文件靠自动检测 ----------
+
+    def test_locates_executables_via_which_not_hardcoded(self):
+        """必须实现 which/where 等价的查找，而不是拼一个猜测的安装路径。"""
+        self.assertIn("shutil.which", self._src, "应该用 shutil.which 做 PATH 查找")
+        self.assertIn("def which(", self._src, "应该提供 which() 包装（含 PATH 未命中的兜底）")
+
+    def test_which_finds_python_and_returns_none_for_garbage(self):
+        """`which()` 的真实行为：能查到 python，查不到的返回 None（不是抛异常）。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_bs_probe", self._src_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        self.assertTrue(mod.which("python", "python3", "py"),
+                        "which() 应该能在 PATH 中找到 python")
+        self.assertIsNone(mod.which("definitely-not-a-real-binary-xyz-42"),
+                          "找不到时应返回 None，而不是抛异常")
+
+    def test_which_fallback_scans_convention_dirs_without_crashing(self):
+        """PATH 查找失败时必须能安全降级到「约定目录」扫描。
+
+        这里复现的是实现过程中真实踩到的坑：早先的兜底逻辑写成
+        `Path("/").glob(绝对模式)`，在 Windows 上会抛
+        `UnsupportedOperation: cannot instantiate 'PosixPath' on your system`。
+        它平时「看不出来」——因为 shutil.which 总能先命中，兜底分支根本没被走到。
+        这条测试主动把 shutil.which 打桩成 None，逼出兜底分支。
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_bs_probe2", self._src_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        orig_which, orig_name = mod.shutil.which, mod.os.name
+        try:
+            mod.shutil.which = lambda n: None      # 模拟 PATH 里啥都没有
+            mod.os.name = "posix"                  # 顺便走一遍 POSIX 目录表
+            try:
+                result = mod.which("sh", "bash", "ls", "env")
+            except Exception as exc:               # noqa: BLE001
+                self.fail(f"兜底扫描抛异常了（应当干净返回 None）：{exc!r}")
+            self.assertTrue(result is None or Path(result).is_file(),
+                            f"返回了不存在的路径：{result!r}")
+        finally:
+            mod.shutil.which, mod.os.name = orig_which, orig_name
+
+    def test_fallback_dirs_are_portable_not_baked_in(self):
+        """兜底目录表必须是跨平台惯例写法，且不能固化当前机器的家目录。
+
+        早先的实现用 `os.path.expanduser(...)` 在 **import 时**求值，
+        等于把「本机家目录」写进了模块属性；而模块属性是在别的机器上也会被加载的。
+        现在要求表里写 `~`，运行时才展开。
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_bs_probe3", self._src_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        for key, dirs in mod._FALLBACK_DIRS.items():
+            for d in dirs:
+                self.assertNotIn("80361", d, f"{key} 表里固化了本机用户名：{d}")
+                self.assertNotIn("ZCodeData", d, f"{key} 表里固化了本机路径：{d}")
+        # 家目录相关的项必须写成 ~ 形式（运行时展开）
+        home_like = [d for d in mod._FALLBACK_DIRS["posix"] if ".local" in d or "pyenv" in d]
+        self.assertTrue(all(d.startswith("~/") for d in home_like),
+                        f"家目录相关兜底项应写成 ~ 形式：{home_like}")
+        self.assertIn("expanduser", self._src,
+                      "应该在运行时用 expanduser 展开 ~，而不是 import 时求值")
+
+    def test_optional_dependency_absence_is_tolerated(self):
+        """Node 是可选依赖：缺失只能降级跳过，不能让整个引导失败。"""
+        self.assertIn("def find_node(", self._src)
+        # 找不到 Node 的分支必须是「跳过」，不是 die()
+        self.assertIn("Node（可选）", self._src)
+        self.assertIn("跳过已有脚本", self._src.replace("跳过注入脚本", "跳过已有脚本")
+                      .replace("跳过滑条冒烟", "跳过已有脚本"))
+
+    # ---------- 3. 跨平台执行细节 ----------
+
+    def test_subprocess_calls_never_use_shell(self):
+        """一律用列表传参、不经 shell —— 路径含空格/中文才安全，也避开 shell 语法差异。"""
+        import ast
+        tree = ast.parse(self._src)
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "run":
+                for kw in node.keywords:
+                    if kw.arg == "shell" and getattr(kw.value, "value", False):
+                        offenders.append(node.lineno)
+        self.assertEqual(offenders, [], f"第 {offenders} 行使用了 shell=True")
+
+    def test_windows_children_suppress_console_window(self):
+        """Windows 下起子进程必须带 CREATE_NO_WINDOW（否则每步闪一个 cmd 窗口）。"""
+        self.assertIn("CREATE_NO_WINDOW", self._src)
+        self.assertIn("0x08000000", self._src)
+
+    def test_subprocess_output_is_decoded_leniently(self):
+        """子进程输出按 UTF-8 + errors=replace 解码。
+
+        直接 apply cp936 管道下的 bytes.decode() 会抛 UnicodeDecodeError 打断整段输出，
+        而钩子/CI 环境恰恰会把 stdout 重定向到管道。
+        """
+        self.assertIn('errors="replace"', self._src)
+
+    def test_no_high_unicode_glyphs_in_output(self):
+        """输出只用 ASCII 标记（[+] / [x] / [!]），不依赖 ✓✗⚠ 这类字符。
+
+        理由：cp936 管道里打印这些字符会抛 UnicodeEncodeError（见 _console.py 的说明）。
+        """
+        bad = [g for g in "✓✗⚠✅↻✔✘" if g in self._src]
+        self.assertEqual(bad, [], f"bootstrap.py 使用了高位 Unicode 符号：{bad}")
+
+    # ---------- 4. 步骤编排 ----------
+
+    def test_step_names_are_consistent(self):
+        """STEP_ORDER 里每个名字都要有标题和处理器，别留下半截。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_bs_steps", self._src_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        for name in mod.STEP_ORDER:
+            self.assertIn(name, mod.STEP_TITLES, f"步骤 {name} 缺标题")
+            self.assertTrue(hasattr(mod, f"step_{name}"), f"步骤 {name} 缺实现函数")
+
+    def test_dry_run_never_executes_writes(self):
+        """`--dry-run` 必须真的不执行命令（只打印），否则「预演」就失去意义。"""
+        self.assertIn("def run(", self._src)
+        # run() 在 dry_run 时应当提前返回，不落到 subprocess.run
+        body = self._src.split("def run(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("if dry_run:", body)
+        dry_pos = body.index("if dry_run:")
+        exec_pos = body.index("subprocess.run")
+        self.assertLess(dry_pos, exec_pos,
+                        "dry_run 判断必须在 subprocess.run 之前")
 
 
 if __name__ == "__main__":

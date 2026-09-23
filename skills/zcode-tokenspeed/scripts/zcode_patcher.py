@@ -446,10 +446,15 @@ def _from_running_processes(found: list[Path]) -> None:
              "Select-Object -ExpandProperty Path -Unique"],
             capture_output=True, timeout=15, errors="replace",
             **no_window_kwargs(),
-        ).stdout or b""
+        ).stdout or ""
     except Exception:
         return
-    for line in out.decode(errors="replace").splitlines():
+    # 注意：传了 errors="replace" 时 subprocess 会直接解码成 **str**（不是 bytes），
+    # 所以这里不能再 `.decode()` —— 那会抛 AttributeError 并被上面吞掉，
+    # 表现为「探测器命中 0 个」这种极难定位的静默失败。两种类型都接住。
+    if isinstance(out, bytes):
+        out = out.decode(errors="replace")
+    for line in out.splitlines():
         line = line.strip()
         # ZCode.exe / ZCode Skin Manager 等都指向安装根目录
         if line.lower().endswith(".exe") and "zcode" in _norm(Path(line).name):

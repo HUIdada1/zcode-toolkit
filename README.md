@@ -35,6 +35,7 @@
 > 拿不准卡在哪一步，别猜 —— 跑一次自检就能定位：[装了没生效？先跑自检](#装了没生效先跑自检)。
 
 只想用命令行、不装插件？跳到 [方式 C](#方式-c只用命令行不装插件)。
+想一条命令跑完自检 + 构建 + 测试？用 [方式 D](#方式-d一键引导脚本跨平台推荐给开发者)。
 
 ---
 
@@ -167,6 +168,46 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py "/opt/ZCode"            
 
 探测顺序：**运行中进程路径 → 注册表卸载信息 → 常见目录**（跨 Windows / macOS / Linux）。
 加 `--verbose` 可以看到每一步的探测结果。
+
+### 方式 D：一键引导脚本（跨平台，推荐给开发者）
+
+仓库根目录的 `bootstrap.py` 把「环境自检 → 依赖检查 → 构建校验 → 回归测试 → 状态查看」串成一条命令。
+**Windows / macOS / Linux 通用，代码里没有任何写死的本机路径**——仓库根由脚本自身位置推导，
+Python / Node 一律通过 `which` / `where` 等价逻辑自动定位。
+
+```bash
+git clone https://github.com/c80361619/zcode-toolkit.git
+cd zcode-toolkit
+
+python bootstrap.py                 # macOS / Linux 上用 python3 bootstrap.py
+```
+
+它依次做五件事：
+
+| 步骤 | 做什么 |
+|---|---|
+| `env` | 打印平台 / Python 版本 / 仓库根；校验 Python ≥ 3.10；确认目录结构完整 |
+| `install` | **校验**依赖（本项目运行时零第三方依赖，只用标准库，没有 `requirements.txt`）；探测可选 Node；只读探测 ZCode 安装位置 |
+| `build` | `py_compile` 全部 Python 脚本 + `node --check` 全部注入脚本（无 Node 则降级跳过） |
+| `test` | 跑全套回归测试，外加 `tests/slider_smoke.js` 滑条冒烟 |
+| `status` | `--all --check` 只读查看各补丁在客户端里的当前状态 |
+
+常用开关：
+
+```bash
+python bootstrap.py --only build,test      # 只跑指定步骤
+python bootstrap.py --skip test            # 跳过某些步骤
+python bootstrap.py --dry-run              # 只打印将要执行的命令，不做任何改动
+python bootstrap.py --all-steps            # 额外把补丁真正写进客户端（需先完全退出 ZCode）
+python bootstrap.py --python /path/to/py   # 指定解释器
+```
+
+退出码：`0` 全绿；`1` 有关键步骤失败；`2` Python 版本不达标。
+
+> **关于「安装依赖」**：本项目的运行时依赖就是** Python 标准库**——没有 `package.json`、
+> 没有 `requirements.txt`、不需要 `pip install`。所以这一步实现为「校验依赖是否就位」，
+> 而不是执行网络安装。唯一的可选外部工具是 Node.js，只用于校验注入脚本语法，
+> 缺失时自动跳过，不影响其余步骤。
 
 ---
 
@@ -642,6 +683,7 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --reasoning-config
 ```
 marketplace.json                              插件市场清单（ZCode「添加插件市场」读它）
 .zcode-plugin/plugin.json                     插件清单（含 8 个功能开关的声明）
+bootstrap.py                                  跨平台引导：自检 + 依赖检查 + 构建 + 测试 + 状态
 commands/                                     四个斜杠命令
 hooks/hooks.json                              SessionStart 钩子（调用 sync.py 同步开关）
 skills/zcode-tokenspeed/
@@ -668,6 +710,16 @@ NOTICE.md                                     第三方组件与许可声明
 ---
 
 ## 开发与发版
+
+```bash
+python bootstrap.py            # 一条命令：自检 + 依赖检查 + 构建校验 + 回归测试 + 状态查看
+```
+
+上面的引导脚本是跨平台的（Windows / macOS / Linux），仓库根由脚本位置推导，
+Python / Node 通过 `which` / `where` 自动定位，源码中不含任何机器相关路径。
+细节见 [方式 D](#方式-d一键引导脚本跨平台推荐给开发者)。
+
+也可以只跑测试：
 
 ```bash
 python -m unittest discover -s tests -v
