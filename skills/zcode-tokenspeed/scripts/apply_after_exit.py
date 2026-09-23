@@ -18,12 +18,16 @@ import sys
 import time
 from pathlib import Path
 
+try:                                   # 控制台编码/窗口安全网（见 _console.py 的说明）
+    from _console import no_window_kwargs
+except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _console import no_window_kwargs
+
 HERE = Path(__file__).resolve().parent
 LOG = HERE / "_apply_after_exit.log"
 POLL_SEC = 3
 MAX_WAIT_SEC = 24 * 3600
-# pythonw 无控制台，子进程若是控制台程序（tasklist 等）会每次新弹 cmd 窗口
-CREATE_NO_WINDOW = 0x08000000
 PYTHON = sys.executable or "python"
 
 
@@ -37,7 +41,7 @@ def zcode_running() -> bool:
     # 模式，text=True 会在读线程里抛 UnicodeDecodeError → stdout 变空 → 误判「已退出」。
     # 同理不带 /FI：从 Git Bash/MSYS 环境启动时 "/FI" 会被路径转换破坏。
     out = subprocess.run(["tasklist"], capture_output=True,
-                         creationflags=CREATE_NO_WINDOW).stdout or b""
+                         **no_window_kwargs()).stdout or b""
     return b"ZCode.exe" in out
 
 
@@ -109,7 +113,7 @@ def main() -> int:
     failed = 0
     for args, revert in tasks:
         cmd = [PYTHON, str(HERE / "zcode_patcher.py"), *args] + (["--revert"] if revert else [])
-        r = subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW)
+        r = subprocess.run(cmd, capture_output=True, **no_window_kwargs())
         out = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
         log(f"$ zcode_patcher.py {' '.join(cmd[2:])}  [exit={r.returncode}]\n{out}".rstrip())
         if r.returncode == 2:

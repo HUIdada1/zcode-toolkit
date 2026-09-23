@@ -122,11 +122,11 @@ import sys
 import time
 from pathlib import Path
 
-try:                                   # 控制台编码安全网（见 _console.py 的说明）
-    from _console import bad_mark, ok_mark, safe_stdio
+try:                                   # 控制台编码/窗口安全网（见 _console.py 的说明）
+    from _console import bad_mark, no_window_kwargs, ok_mark, safe_stdio
 except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from _console import bad_mark, ok_mark, safe_stdio
+    from _console import bad_mark, no_window_kwargs, ok_mark, safe_stdio
 
 # 全部补丁的命令行参数名：--all 会一次性把它们打开（新增补丁时只需加进这里）
 ALL_PATCH_FLAGS = (
@@ -445,6 +445,7 @@ def _from_running_processes(found: list[Path]) -> None:
              "Get-Process | Where-Object {$_.Path} | "
              "Select-Object -ExpandProperty Path -Unique"],
             capture_output=True, timeout=15, errors="replace",
+            **no_window_kwargs(),
         ).stdout or b""
     except Exception:
         return
@@ -2410,9 +2411,9 @@ def zcode_running() -> bool:
         if os.name == "nt":
             # 用 bytes 检索：tasklist 输出是 GBK，text=True 会在读线程抛 UnicodeDecodeError
             out = subprocess.run(["tasklist"], capture_output=True, timeout=15,
-                                 creationflags=0x08000000).stdout or b""
+                                 **no_window_kwargs()).stdout or b""
             return b"ZCode.exe" in out
-        r = subprocess.run(["pgrep", "-f", "ZCode"], capture_output=True, timeout=10)
+        r = subprocess.run(["pgrep", "-f", "ZCode"], capture_output=True, timeout=10)  # no-window-ok: 只在 POSIX 分支执行
         return r.returncode == 0
     except Exception:
         return False

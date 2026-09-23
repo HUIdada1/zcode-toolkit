@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 #: cp936 里没有、但项目里用到的符号 → ASCII 备选
@@ -70,3 +71,26 @@ def bad_mark() -> str:
 def warn_mark() -> str:
     """警示标记（⚠ 在 cp936 里没有，会自动降级成 `!`）。"""
     return glyph("⚠", "!")
+
+
+#: Windows: 不为子进程分配控制台（也就不会弹出窗口）
+CREATE_NO_WINDOW = 0x08000000
+
+
+def no_window_kwargs() -> dict:
+    """返回「别弹控制台窗口」的 Popen/run 参数；非 Windows 返回空 dict。
+
+    **为什么必须有**：本插件的 SessionStart 钩子用 `--detach` 把 sync.py 拉成
+    `DETACHED_PROCESS | CREATE_NO_WINDOW` 的后台 worker —— 也就是**没有控制台**。
+    Windows 的语义是：**无控制台的父进程创建 console 子进程时，系统会新建一个控制台并显示出来**。
+    于是 worker 里每一次 `subprocess.run([python, zcode_patcher.py, …])` 都会闪出一个 cmd 窗口；
+    而 `run_sync()` 会为每个开关调一次 `check_state()` —— 一个会话能弹 8 个以上。
+
+    实测（本机，探针 EnumWindows 统计可见控制台窗口）：无控制台父进程
+      * 不传 creationflags → 期间出现 **2 个**可见控制台窗口
+      * 传 CREATE_NO_WINDOW → **0 个**
+    注意 `capture_output=True` **挡不住**这个窗口：它管的是管道，不是控制台分配。
+    """
+    if os.name != "nt":
+        return {}
+    return {"creationflags": CREATE_NO_WINDOW}

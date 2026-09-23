@@ -32,6 +32,12 @@ import sys
 import time
 from pathlib import Path
 
+try:                                   # 控制台编码/窗口安全网（见 _console.py 的说明）
+    from _console import no_window_kwargs
+except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _console import no_window_kwargs
+
 HERE = Path(__file__).resolve().parent
 PATCHER = HERE / "zcode_patcher.py"
 WATCHDOG = HERE / "apply_after_exit.py"
@@ -115,7 +121,7 @@ def spawn_detached(extra_args: list) -> bool:
     else:
         kw["start_new_session"] = True
     try:
-        subprocess.Popen(cmd, **kw)
+        subprocess.Popen(cmd, **kw)   # no-window-ok: 标志在 kw 里（含 CREATE_NO_WINDOW）
         return True
     except Exception as exc:
         log(f"后台启动失败: {exc!r}")
@@ -220,7 +226,8 @@ def check_state(args) -> str:
     r = subprocess.run([sys.executable, str(PATCHER), *args, "--check"],
                        capture_output=True, encoding="utf-8", errors="replace",
                        cwd=str(HERE), timeout=120,
-                       env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                       **no_window_kwargs())
     out = (r.stdout or "") + (r.stderr or "")
     if "不适用" in out:
         return "na"
@@ -246,7 +253,8 @@ def run_patcher(args, revert: bool) -> str:
     cmd = [sys.executable, str(PATCHER), *args] + (["--revert"] if revert else [])
     r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace",
                        cwd=str(HERE), timeout=300,
-                       env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                       **no_window_kwargs())
     out = (r.stdout or "") + (r.stderr or "")
     refused = r.returncode == 2 or "检测到 ZCode 正在运行" in out
     # zcode_patcher.py 拒绝改写时仍返回 0（只在输出里打 [!] 说明原因），必须看输出判定

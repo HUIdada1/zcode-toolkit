@@ -42,11 +42,11 @@ PATCHER = HERE / "zcode_patcher.py"
 LOG = HERE / "_sync.log"
 STAMP = HERE / "_sync.last"
 
-try:                                   # 控制台编码安全网（见 _console.py 的说明）
-    from _console import safe_stdio
+try:                                   # 控制台编码/窗口安全网（见 _console.py 的说明）
+    from _console import no_window_kwargs, safe_stdio
 except ImportError:                    # 被别处 import 时脚本目录可能不在 sys.path
     sys.path.insert(0, str(HERE))
-    from _console import safe_stdio
+    from _console import no_window_kwargs, safe_stdio
 
 PLUGIN_NAME = "zcode-tokenspeed"
 REPO_NAME = "zcode-toolkit"
@@ -615,7 +615,8 @@ def check_patches() -> None:
     try:
         r = subprocess.run([sys.executable, str(PATCHER), "--all", "--check"],
                            capture_output=True, encoding="utf-8", errors="replace",
-                           cwd=str(HERE), timeout=180, env=env)
+                           cwd=str(HERE), timeout=180, env=env,
+                           **no_window_kwargs())
     except Exception as e:
         print(f"{BAD} 执行失败：{e!r}")
         return

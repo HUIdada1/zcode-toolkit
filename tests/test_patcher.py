@@ -19,6 +19,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -879,6 +880,99 @@ class TestCheckStateWording(unittest.TestCase):
 
     def test_unrecognized_output_is_unknown(self):
         self.assertEqual(self._state("完全看不懂的输出"), "unknown")
+
+
+class TestNoConsoleWindowFlags(unittest.TestCase):
+    """每个会起 console 子进程的调用都必须带「别弹控制台窗口」的标志。
+
+    为什么值得钉死：钩子用 `--detach` 把 sync.py 拉成 `DETACHED_PROCESS|CREATE_NO_WINDOW`
+    的后台 worker —— 也就是**没有控制台**。Windows 的语义是「无控制台的父进程创建 console
+    子进程时，系统会新建一个控制台并**显示**出来」，于是 worker 里每调一次
+    `check_state()` 就闪一个 cmd 窗口；而 `run_sync()` 会为每个开关调一次 —— 一个会话能弹 8 个以上。
+
+    实测（本机探针，EnumWindows 统计可见控制台窗口数）：无控制台父进程
+      * 不传 creationflags → 期间出现 **2 个**可见控制台窗口
+      * 传 `CREATE_NO_WINDOW` → **0 个**
+    注意 `capture_output=True` 挡不住它 —— 它管的是管道，不是控制台分配。
+
+    `apply_after_exit.py` 早就知道这个坑（注释里写着「pythonw 无控制台…会每次新弹 cmd 窗口」），
+    但 sync.py / zcode_patcher.py / doctor.py 漏了。这条测试就是防它再漏。
+
+    允许两种写法：`**no_window_kwargs()`（推荐）或 `creationflags=...`。
+    确实不需要的调用，在调用处同一行写 `# no-window-ok: <理由>` 显式豁免。
+    """
+
+    @staticmethod
+    def _mask(src: str) -> str:
+        """把注释与字符串**内容**替换成空格（保持长度与行号不变）。
+
+        必须屏蔽：`_console.py` 的文档里就写着 `subprocess.run(capture_output=True)` 作为例子，
+        不屏蔽会把它当成真实调用误报。标记 `# no-window-ok:` 是注释，所以判定时要用原文。
+        """
+        import io as _io
+        import tokenize
+        starts = [0]
+        for ln in src.splitlines(keepends=True):
+            starts.append(starts[-1] + len(ln))
+
+        def off(pos):
+            row, col = pos
+            return starts[row - 1] + col if row - 1 < len(starts) else len(src)
+
+        buf = list(src)
+        try:
+            for tok in tokenize.generate_tokens(_io.StringIO(src).readline):
+                if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+                    continue
+                for i in range(off(tok.start), min(off(tok.end), len(buf))):
+                    if buf[i] != "\n":
+                        buf[i] = " "
+        except Exception:
+            return src
+        return "".join(buf)
+
+    def _calls(self, masked: str, original: str):
+        """找出所有 subprocess.run/Popen 调用：返回 (行号, 调用原文, 调用后同行尾巴)。"""
+        found = []
+        for m in re.finditer(r"subprocess\.(?:run|Popen)\(", masked):
+            i, depth = m.end(), 1
+            while i < len(masked) and depth:
+                if masked[i] == "(":
+                    depth += 1
+                elif masked[i] == ")":
+                    depth -= 1
+                i += 1
+            line_end = masked.find("\n", i)
+            line_end = len(masked) if line_end == -1 else line_end
+            found.append((masked[:m.start()].count("\n") + 1,
+                          masked[m.start():i],            # 已屏蔽，用于判定
+                          original[i:line_end]))          # 原文，用于读豁免标记
+        return found
+
+    def test_every_subprocess_call_suppresses_the_console_window(self):
+        d = _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"
+        if not d.is_dir():
+            self.skipTest("非插件形态布局")
+        offenders = []
+        for p in sorted(d.glob("*.py")):
+            src = p.read_text(encoding="utf-8")
+            masked = self._mask(src)
+            for line, text, tail in self._calls(masked, src):
+                if "no_window_kwargs" in text or "creationflags" in text:
+                    continue
+                if "no-window-ok" in tail:
+                    continue
+                offenders.append("%s:%d  %s" % (p.name, line, text.splitlines()[0][:72]))
+        self.assertEqual(
+            offenders, [],
+            "这些子进程调用会弹出可见控制台窗口，请加 **no_window_kwargs()"
+            "（或在不必要时写 # no-window-ok: 理由）：\n  " + "\n  ".join(offenders))
+
+    def test_no_window_helper_is_a_noop_off_windows(self):
+        """helper 在非 Windows 上必须返回空 dict，否则会污染别的平台。"""
+        import _console
+        self.assertEqual(set(_console.no_window_kwargs()),
+                         {"creationflags"} if os.name == "nt" else set())
 
 
 class TestInjectionBlocks(unittest.TestCase):
