@@ -24,7 +24,7 @@
   const BTN_ID = "zcode-enhance-prompt-btn";
   const STYLE_ID = "zenhance-style";
   const diag = (window.__zenhanceDiag = window.__zenhanceDiag || {});
-  diag.scriptVersion = "1.2";
+  diag.scriptVersion = "1.3";
 
   const TIP_IDLE = "增强提示词";
   const TIP_BUSY = "增强中…";
@@ -94,16 +94,57 @@
   }
 
   // ---------- 输入框定位 / 读写 ----------
-  function findInput() {
-    for (const sel of COMPOSER_INPUT_SELECTORS) {
+  // ★ 关键：绝不能在整个 document 里搜「textarea / [contenteditable]」——
+  //   会话消息区（timeline）里同样可能存在这类节点（消息内嵌编辑器、选区工具等），
+  //   一旦命中就会被当成交互输入框，按钮随即被插进消息流里，表现为「按钮跑出输入框」。
+  //   因此所有查找都先锚定到 composer dock（输入框所在的固定容器）内部。
+  const DOCK_SELECTORS = [
+    "[data-v4-composer-dock='true']",
+    "[data-v4-composer-dock]",
+    "[data-testid='v4-composer']",
+  ];
+
+  /** 取 composer dock —— 输入框与其工具栏行的最近公共容器。 */
+  function findDock() {
+    for (const sel of DOCK_SELECTORS) {
       let els = [];
       try { els = Array.from(document.querySelectorAll(sel)); } catch (err) { continue; }
+      if (!els.length) continue;
+      // 可见优先；仍以「最靠下」为准则（多会话/侧边栏场景可能有多个）
       const vis = els.filter((e) => e.offsetParent != null);
       const pool = vis.length ? vis : els;
-      if (pool.length) {
+      pool.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+      return pool[0];
+    }
+    return null;
+  }
+
+  function findInput() {
+    // ① 严格模式：只在 dock 内找输入框。找不到宁可返回 null 不动，
+    //    也绝不去消息区里误抓一个元素回来。
+    const dock = findDock();
+    if (dock) {
+      for (const sel of COMPOSER_INPUT_SELECTORS) {
+        let els = [];
+        try { els = Array.from(dock.querySelectorAll(sel)); } catch (err) { continue; }
+        if (!els.length) continue;
+        const vis = els.filter((e) => e.offsetParent != null);
+        const pool = vis.length ? vis : els;
         pool.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
         return pool[0];
       }
+    }
+    // ② 兼容模式：dock 锚点不存在才退回全局，但仅认「带明确 composer 语义」的选择器，
+    //    不含 textarea / [contenteditable] 这类会误伤消息区的通用选择器。
+    for (const sel of COMPOSER_INPUT_SELECTORS) {
+      if (sel === "textarea" || sel === "[contenteditable='true']" || sel === "form textarea") continue;
+      let els = [];
+      try { els = Array.from(document.querySelectorAll(sel)); } catch (err) { continue; }
+      if (!els.length) continue;
+      const vis = els.filter((e) => e.offsetParent != null);
+      const pool = vis.length ? vis : els;
+      pool.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+      return pool[0];
     }
     return null;
   }
@@ -265,19 +306,44 @@
     ensureStyle();
     const input = findInput();
     if (!input) { if (btn) { btn.remove(); btn = null; } diag.hiddenReason = "未找到输入框"; return; }
+
+    // ★ 挂载点必须在 composer dock 内部，且优先与「发送按钮」同一工具栏行。
+    //   历史 bug：兜底用 input.parentElement / card.querySelector("div") 取到的是
+    //   dock 的某个祖先或无关兄弟，按钮被插到消息流里（按钮「跑出输入框」）。
+    const dock = findDock();
     let host = null;
     try {
+      // ① 首选：发送按钮的父节点 = 工具栏行（恒在 dock 内）
       const send = document.querySelector("[data-testid='v4-composer-send']");
       if (send && send.parentElement) host = send.parentElement;
+      // ② 次选：dock 内的工具栏行 / 卡片
+      if (!host && dock) {
+        host = dock.querySelector("[data-testid*='composer-toolbar']")
+            || dock.querySelector("[data-testid='v4-composer']")
+            || dock.querySelector("[data-v4-composer-dock-content]")
+            || dock;
+      }
+      // ③ 末选：输入框向上找 dock 为止（只允许爬升到 dock，不许越过）
+      if (!host && dock) {
+        let cur = input.parentElement;
+        while (cur && cur !== dock && !dock.contains(cur)) cur = cur.parentElement;
+        host = cur && dock.contains(cur) ? cur : null;
+      }
     } catch (err) { /* ignore */ }
-    if (!host) {
-      const card = input.closest("[data-testid='v4-composer']") || input.parentElement;
-      host = card && (card.querySelector("div") || card);
-    }
+
+    // 最终校验：挂载点必须在 dock 内。不在就宁可不挂，也绝不渲染到消息区。
+    if (host && dock && !dock.contains(host)) host = dock;
     if (!host) { diag.hiddenReason = "未找到工具栏行"; return; }
 
     if (btn && btn.isConnected) {
-      if (btn.parentElement !== host) host.insertBefore(btn, host.firstChild);
+      // ★ 位置自愈：按钮虽还在文档里，但已不在正确容器内（客户端重渲染把按钮
+      //   连同旧节点一起搬走 / 被消息列表的 DOM 复用吞掉）→ 主动搬回来。
+      const okPlace = btn.parentElement === host;
+      const stillInDock = !dock || dock.contains(btn);
+      if (!okPlace || !stillInDock) {
+        diag.reattaches = (diag.reattaches || 0) + 1;
+        host.insertBefore(btn, host.firstChild);
+      }
       return;
     }
     btn = document.createElement("button");
@@ -300,14 +366,22 @@
   function start() {
     ensureStyle();
     let timer = null;
+    // 抖动：DOM 变动很密集（流式输出时每帧都在改），300ms 合并一次足够；
+    // 且 ensureButton() 内部只在「位置不对」时才真正写 DOM，不会引起抖动循环。
     const schedule = () => {
       if (timer) return;
       timer = setTimeout(() => { timer = null; if (!document.hidden) ensureButton(); }, 300);
     };
     try {
-      new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+      // ★ 只监听 dock 所在的子树 + 顶层结构变化，避免被消息流每帧刷新增量拖慢；
+      //   订阅 childList 即可——按钮错位总是源于节点被移动/替换。
+      new MutationObserver(schedule).observe(document.body, {
+        childList: true, subtree: true,
+      });
     } catch (err) { /* 静默 */ }
-    setInterval(() => { if (!document.hidden) ensureButton(); }, 2000);
+    // 兜底轮询：即使 MutationObserver 漏事件（如纯 style 变更导致的 sticky 失效），
+    // 也能在一个短周期内把按钮搬回正确位置。
+    setInterval(() => { if (!document.hidden) ensureButton(); }, 1000);
     ensureButton();
   }
 

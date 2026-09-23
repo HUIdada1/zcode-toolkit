@@ -779,12 +779,66 @@ python enhance_doctor.py --probe --model-value "builtin:zai-coding-plan/GLM-5.2"
 `lastRequest.modelValue`（空 = ref 通道失效）、`modelCandidates`（>1 = 页面有多个模型节点）、
 `lastResult.code`、`hiddenReason`（按钮没挂上时的原因）。
 
+### ★ 已知坑：按钮「跑出输入框」渲染进消息区（0.5.11 修复）
+
+**症状**：多轮对话 / 消息列表增长时，润色按钮出现在会话消息区域里
+（有的表现为「输入框旁边的按钮突然不见，消息流中间多出一个图标」）。
+
+**根因**：`zcode-enhance-prompt.js` 的 `findInput()` 在**整个 `document`** 上按
+`COMPOSER_INPUT_SELECTORS` 查找 —— 其中 `textarea` / `[contenteditable='true']` /
+`form textarea` 是**通用选择器**。而客户端的消息区里也可能出现这类节点，于是：
+
+1. 消息区元素被误认成「交互输入框」（读写正文也跟着错）；
+2. 用它反推挂载点（`input.parentElement` / `card.querySelector("div")`）→
+   按钮被插进消息流 → 视觉上「按钮跑出输入框」。
+
+放大该问题的是客户端的真实 DOM 结构（`out/renderer/assets/styles-*.js` 实证）：
+
+```
+div[data-v4-timeline-scroll]          ← overflow-y-auto，真正的滚动宿主
+└─ div                                 ← flex min-h-full flex-col
+   ├─ div[data-v4-timeline-message-layer]      ← 消息层
+   │  ├─ div[data-v4-timeline-header-slot]
+   │  ├─ div[data-v4-timeline-virtual-history] ← 虚拟列表（absolute + translateY）
+   │  ├─ div[data-v4-running-live-tail]
+   │  └─ div[data-v4-timeline-content-column]
+   └─ div[data-v4-composer-dock]        ← ★ 输入框 dock，与消息层**同级兄弟**
+      └─ div[data-v4-composer-dock-content]
+         └─ div[data-v4-back-to-bottom-anchor="composer-dock"]
+            └─ … composer 卡片（含 v4-composer-send 工具栏行）
+```
+
+关键点：**dock 和消息层都在滚动容器内部**，dock 仅靠
+`` K ? `mt-3 shrink-0` : oe ? `shrink-0` : `sticky bottom-0` `` 贴底。
+一旦按钮被插进消息流那一侧，它就**不再受 dock 的 sticky 约束**，
+随消息增长被一路推到列表底部 —— 这正是「多轮对话后才明显」的原因。
+
+**修复（0.5.11）**：
+
+1. 新增 `findDock()`：按 `[data-v4-composer-dock='true']` / `[data-v4-composer]`
+   定位 composer dock（可见优先 + 最靠下，兼容多会话场景）。
+2. `findInput()` 改为**两段式**：
+   - ① 严格模式：只在 **dock 内**子查询；
+   - ② 兼容模式：dock 不存在才退回全局，且**跳过** `textarea` /
+     `[contenteditable='true']` / `form textarea` 这些会误伤消息区的通用选择器。
+3. `ensureButton()` 的挂载点收敛到 dock 内：
+   发送按钮的父节点 → dock 内的 toolbar/卡片 → 输入框向上爬到 dock 为止；
+   最后一道校验 `if (host && dock && !dock.contains(host)) host = dock;`
+   —— **越界就回退到 dock 本体，宁可不挂也不渲染进消息区**。
+4. 位置自愈：已连接的按钮若 `btn.parentElement !== host` 或已脱离 dock，
+   主动 `insertBefore` 搬回，并累加 `diag.reattaches`。
+5. 轮询 2000ms → **1000ms**（流式输出时消息持续增长，周期过长会肉眼可见地错位）。
+
+自诊断新增字段：`window.__zenhanceDiag.reattaches`（>0 说明发生过自愈搬迁，
+可用于确认线上是否仍在错位）。
+
 ### 排障速查
 
 | 现象 | 处理 |
 |---|---|
 | 报 `Model is unavailable` | ★ 解析没命中界面所选模型。跑 `enhance_doctor.py --model-value "<providerId>/<modelId>"` 看 `how=`；`ref` 之外都要查：① 选中供应商是否只在 `provider_config.json` 里（旧版 handler 读的是 `config.json`，见上文 0.5.10）；② 该供应商是否被 `systemDisabledReason` 禁用 |
-| 升级到 0.5.10 后仍报错 | 确认**注入**也升到了 0.5.10：`--enhance-prompt --dry-run` 看是否有「将热更新…（X → Y 字节）」。`--check` 只看挂载标记，不比对脚本内容 |
+| 按钮跑到消息区 / 看不见 | ★ 挂载点跑出了 composer dock。升级到 **0.5.11+**；确认注入也是新版（`--dry-run`）。诊断看 `window.__zenhanceDiag.reattaches`（>0 = 发生过自愈）与 `hiddenReason` |
+| 升级到 0.5.10 后仍报错 | 确认**注入**也升到了新版：`--enhance-prompt --dry-run` 看是否有「将热更新…（X → Y 字节）」。`--check` 只看挂载标记，不比对脚本内容 |
 | 报「通信桥不可用」 | preload 桥缺失；重跑 `--enhance-prompt` 注入后**重启** ZCode |
 | 按钮不出现 | `window.__zenhanceDiag.hiddenReason`；找不到输入框 / 找不到工具栏行 |
 | 报 `no-model` | 没有可用候选（全表缺 key/baseURL 或被禁用），按提示补配置 |

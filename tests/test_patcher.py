@@ -1205,6 +1205,103 @@ class TestSliderScript(unittest.TestCase):
         self.assertIn("smoke OK", r.stdout)
 
 
+class TestEnhancePromptScript(unittest.TestCase):
+    """润色按钮的挂载逻辑：按钮绝不能渲染到会话消息区。
+
+    历史 bug：`findInput()` 在**整个 document** 上按 `textarea` /
+    `[contenteditable='true']` 这类通用选择器找「交互输入框」。但客户端的会话消息区
+    （`[data-v4-timeline-scroll]` 内）也会出现这类节点，一旦命中就会：
+      ① 把消息区元素误认成输入框 → 读写正文全错；
+      ② 用它推导挂载点 → 按钮被插进消息流 → 表现为「按钮跑出输入框」。
+    而且输入框 dock（`[data-v4-composer-dock]`）与消息层是**同级兄弟**，
+    都位于滚动容器内，dock 仅靠 `sticky bottom-0` 贴底，所以插错位置后
+    会随消息增长被推到列表底部。
+
+    修法：所有查找先锚定 dock；兼容模式禁用会误伤消息区的通用选择器。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = None
+        for cand in (_HERE.parent / "scripts",
+                     _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"):
+            p = cand / "zcode-enhance-prompt.js"
+            if p.is_file():
+                cls.script = p
+                break
+        if cls.script is None:
+            raise unittest.SkipTest("未找到润色脚本")
+
+    def setUp(self):
+        self.src = self.script.read_text(encoding="utf-8")
+
+    def test_scopes_input_lookup_to_composer_dock(self):
+        """必须先解析 dock，再在 dock 内找输入框。"""
+        self.assertIn("function findDock(", self.src, "必须存在 dock 解析函数")
+        self.assertIn("data-v4-composer-dock", self.src,
+                      "dock 锚点应使用客户端的 data-v4-composer-dock")
+        # findInput 内必须先拿到 dock，并用 dock.querySelectorAll 而不是 document
+        body = self.src[self.src.index("function findInput("):]
+        body = body[:body.index("\n  function readText")]
+        self.assertIn("findDock()", body, "findInput 必须先锚定 dock")
+        self.assertIn("dock.querySelectorAll", body, "输入框只在 dock 内查找")
+        self.assertLess(body.index("dock.querySelectorAll"),
+                        body.index("document.querySelectorAll"),
+                        "dock 内查找必须排在全局查找之前")
+
+    def test_fallback_never_uses_generic_selectors(self):
+        """兼容模式的全局查找必须排除会误伤消息区的通用选择器。"""
+        body = self.src[self.src.index("function findInput("):]
+        body = body[:body.index("\n  function readText")]
+        # 兼容分支里必须把 textarea / contenteditable 挡掉
+        self.assertIn('sel === "textarea"', body)
+        self.assertIn('[contenteditable=', body)
+        self.assertIn("continue", body)
+        # COMPOSER_INPUT_SELECTORS 里仍保留这些选择器（供 dock 内查找使用），
+        # 但整个 document 直接用它就是 bug
+        self.assertIn("COMPOSER_INPUT_SELECTORS", body)
+
+    def test_host_is_validated_inside_dock(self):
+        """挂载点最终必须在 dock 内，否则宁可不挂。"""
+        body = self.src[self.src.index("function ensureButton("):]
+        self.assertIn("dock.contains(host)", body,
+                      "挂载点必须校验在 dock 内（否则会渲染进消息区）")
+        self.assertIn("if (host && dock && !dock.contains(host)) host = dock;", body,
+                      "越界的挂载点应回退到 dock 本身")
+
+    def test_button_self_heals_when_detached_from_dock(self):
+        """客户端重渲染会把按钮搬走 —— 必须能自动搬回来（且记账到 diag）。"""
+        body = self.src[self.src.index("function ensureButton("):]
+        self.assertIn("stillInDock", body, "需要判断按钮是否已脱离 dock")
+        self.assertIn("reattaches", body, "自愈次数要记入诊断，便于线上确认")
+        # 自愈分支：先记账，再 insertBefore 搬回，最后 return（不重复创建按钮）
+        m = re.search(
+            r"if \(!okPlace \|\| !stillInDock\) \{([\s\S]*?)\}", body)
+        self.assertIsNotNone(m, "找不到「位置不对就搬回」的分支")
+        branch = m.group(1)
+        self.assertIn("reattaches", branch, "自愈分支要记账")
+        self.assertIn("host.insertBefore(btn, host.firstChild)", branch,
+                      "自愈分支要把按钮搬回挂载点")
+        # 已连接的按钮分支不得重新 createElement（否则会重复插入）
+        self.assertNotIn("createElement", branch, "自愈分支不应重建按钮")
+
+    def test_no_unscoped_generic_query_remains(self):
+        """全局 document 查询里不得再出现裸 textarea / contenteditable。"""
+        for bad in ('document.querySelectorAll("textarea")',
+                    "document.querySelectorAll('[contenteditable='",
+                    'document.querySelectorAll("form textarea")'):
+            self.assertNotIn(bad, self.src,
+                             f"存在会误伤消息区的全局查询：{bad}")
+
+    def test_mount_poll_is_tight_enough_for_streaming(self):
+        """流式输出时消息持续增长，轮询周期必须够短，否则按钮会肉眼可见地错位。"""
+        m = re.search(r"setInterval\(\(\) => \{ if \(!document\.hidden\) ensureButton\(\); \}, (\d+)\)",
+                      self.src)
+        self.assertIsNotNone(m, "找不到挂载轮询")
+        self.assertLessEqual(int(m.group(1)), 1000,
+                             "轮询周期过长：流式对话中按钮会长时间停在错误位置")
+
+
 class TestDoctor(unittest.TestCase):
     """doctor.py 是「插件装了没生效」时的第一入口。它靠一批常量去定位安装目录、
     配置键和开关表——这些常量一旦和真实实现漂移，自检报告会指向错误的目录，
