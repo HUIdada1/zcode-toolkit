@@ -1,6 +1,6 @@
 {
   "name": "zcode-tokenspeed",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "ZCode 桌面客户端本地补丁注入工具：思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、增强提示词按钮、设置页模型拉取按钮。装完重启即自动注入（零配置），全部幂等、可检查、可精确还原，并支持在插件详情页逐项开关。",
   "author": {
     "name": "c80361619"
@@ -11,19 +11,19 @@
     "reasoning_config": {
       "type": "boolean",
       "title": "思考档位配置（3.14+）",
-      "description": "把各模型已配的档位写进 provider_config.json 的 optionSpecs.reasoningLevel，界面档位列表与请求体参数都由它下发。3.14 起用这个，不需要内核补丁；界面手动配置过的模型会自动跳过。默认开启，重启 ZCode 后可见。",
+      "description": "把各模型已配的档位写进 provider_config.json 的 optionSpecs.reasoningLevel，界面档位列表与请求体参数都由它下发。3.14 起用这个，不需要内核补丁；界面手动配置过的模型会自动跳过。默认开启；会在你完全退出 ZCode 时写入，下次启动可见。",
       "default": true
     },
     "usage_chart": {
       "type": "boolean",
       "title": "用量页去截断",
-      "description": "「设置 → 用量」趋势图与饼图全量展示，不再只画 Top 6 / Top 5。默认开启，重启 ZCode 后可见。",
+      "description": "「设置 → 用量」趋势图与饼图全量展示，不再只画 Top 6 / Top 5。默认开启；会在你完全退出 ZCode 时写入，下次启动可见。",
       "default": true
     },
     "model_width": {
       "type": "boolean",
       "title": "模型弹窗加宽",
-      "description": "模型选择浮窗 192px → 320px，长模型名不再被截断。默认开启，重启 ZCode 后可见。",
+      "description": "模型选择浮窗 192px → 320px，长模型名不再被截断。默认开启；会在你完全退出 ZCode 时写入，下次启动可见。",
       "default": true
     },
     "tps_footer": {

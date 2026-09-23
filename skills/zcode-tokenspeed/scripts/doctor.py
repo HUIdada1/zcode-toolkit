@@ -61,6 +61,9 @@ PATCH_KEYS = [
     ("enhance_prompt", "增强提示词"),
     ("model_puller", "模型拉取按钮"),
 ]
+# 「重打包级」= 要改写整个 app.asar（其余几项只改 provider_config.json / 字节级原地覆盖）。
+# 注意：**生效时机上八项没有区别** —— zcode_patcher.py 只要发现 ZCode.exe 在跑就一律拒绝写入，
+# 所以都得等退出后由看护写。这个集合只用来区分「改的东西有多重」，不再代表「要不要重启」。
 REPACK_KEYS = {"tps_footer", "thought_slider", "enhance_prompt", "model_puller"}
 
 OK, WARN, BAD, INFO = "  [√]", "  [!]", "  [×]", "  [i]"
@@ -415,22 +418,25 @@ def check_options() -> bool:
         print("       想关掉个别功能，再到「高级信息 → 配置」拨成关并保存（保存值优先于默认值）。")
         return False
     print(f"{INFO} 已保存的开关：")
-    repack_on = []
+    on_keys = []
     for key, label in PATCH_KEYS:
         if key in saved:
             on = bool(saved[key])
-            tag = "（重打包级，需退出两次才可见）" if (on and key in REPACK_KEYS) else ""
+            tag = "（需 ZCode 完全退出后写入）" if on else ""
             print(f"        {label:<14} {key} = {saved[key]}{tag}")
-            if on and key in REPACK_KEYS:
-                repack_on.append(key)
+            if on:
+                on_keys.append(key)
     if "core_patch" in saved:
         print(f"        {'思考档位内核补丁':<14} core_patch = {saved['core_patch']}")
     unknown = [k for k in saved if k not in dict(PATCH_KEYS) and k != "core_patch"]
     for k in unknown:
         print(f"        (未知键) {k} = {saved[k]}")
-    if repack_on:
-        print(f"{WARN} 其中 {len(repack_on)} 项是重打包级：要等 ZCode **完全退出**写入 app.asar，"
-              "再启动一次才可见")
+    if on_keys:
+        repack = [k for k in on_keys if k in REPACK_KEYS]
+        extra = f"，其中 {len(repack)} 项属重打包级" if repack else ""
+        print(f"{WARN} 以上 {len(on_keys)} 项都要等 ZCode **完全退出**后由看护写入"
+              f"（客户端运行时会拒绝改写 app.asar 与 provider_config.json，"
+              f"而会话钩子必然在运行中触发）{extra}；写完会自动重启 ZCode")
     print(f"{OK} 有已保存的开关")
     return True
 

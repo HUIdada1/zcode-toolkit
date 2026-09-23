@@ -86,22 +86,24 @@ def quiet(fn, *a, **kw):
 
 
 @contextlib.contextmanager
-def patcher_stubbed(sync, states=None):
+def patcher_stubbed(sync, states=None, verdicts=None):
     """把 sync 里三处会真正碰客户端的地方换成记录桩，并返回调用记录列表。
 
     **单元测试绝不能真的跑 zcode_patcher.py** —— 那会按当前开关改写本机的 app.asar，
     跑一次测试就顺手把用户的客户端改了。所以：
       check_state   → 查表返回（默认全 "on"，即「客户端已一致」，最安全的基线）
-      run_patcher   → 只记录，不执行
+      run_patcher   → 只记录，不执行（默认返回 "ok"；verdicts 可让某组参数返回 "refused"/"fail"）
       start_watchdog→ 只记录，不起进程
     调用记录形如 ("run", ("--usage-chart",), False) / ("watchdog", {"tps_footer": True})。
     """
     table = states or {}
+    vtable = verdicts or {}
     calls = []
     orig = (sync.check_state, sync.run_patcher, sync.start_watchdog)
     sync.check_state = lambda args: table.get(tuple(args), "on")
     sync.run_patcher = lambda args, revert: (
-        calls.append(("run", tuple(args), revert)), True)[1]
+        calls.append(("run", tuple(args), revert)),
+        vtable.get(tuple(args), "ok"))[1]
     sync.start_watchdog = lambda wanted: calls.append(("watchdog", dict(wanted)))
     try:
         yield calls
@@ -993,7 +995,7 @@ class TestDoctor(unittest.TestCase):
                          "doctor 的开关表漏项 → 自检报告会漏掉某个功能的状态")
 
     def test_repack_set_matches_sync(self):
-        """doctor 的结论里说「重打包级补丁需要两次启动」，这个集合必须与 sync 一致。"""
+        """doctor 用这个集合区分「重打包级」补丁，必须与 sync.PATCHES 的第三列一致。"""
         import doctor
         import sync
         self.assertEqual(doctor.REPACK_KEYS, {k for k, _a, r in sync.PATCHES if r})
@@ -1300,7 +1302,7 @@ class TestAutoInject(unittest.TestCase):
             self.sync.read_options, self.sync.declared_defaults = orig
         self.assertEqual(calls, [], "不适用的补丁不应被执行")
         self.assertIn("本版本不适用", summary)
-        self.assertNotIn("已生效", summary)
+        self.assertNotIn("已写入", summary)
 
     def test_na_is_skipped_even_when_user_asked_for_it(self):
         """用户显式打开也不该去跑不适用的补丁——照样只标注、不执行。"""
@@ -1314,6 +1316,73 @@ class TestAutoInject(unittest.TestCase):
             self.sync.read_options, self.sync.declared_defaults = orig
         self.assertEqual(calls, [])
         self.assertIn("本版本不适用", summary)
+
+    # ------------------------------------------- 被客户端拒绝 → 转交退出后看护
+
+    def _resolve_only(self, opts):
+        """把 read_options / declared_defaults 固定住，只观察 run_sync 的动作。"""
+        orig = (self.sync.read_options, self.sync.declared_defaults)
+        self.sync.read_options = lambda: (opts, "config")
+        self.sync.declared_defaults = lambda: {}
+        return orig
+
+    def test_refused_write_is_deferred_not_reported_as_failure(self):
+        """客户端在运行 → zcode_patcher.py 直接拒绝写入（exit 2）。
+
+        这不是失败，而是「现在不能写，等退出后写」：必须转交 apply_after_exit.py。
+        否则用户看到的就是「未处理: xxx(执行失败)」而**永远不生效** ——
+        SessionStart 钩子必然在 ZCode 运行中触发，所以这条路是常态而非例外。
+        """
+        orig = self._resolve_only({"reasoning_config": True})
+        try:
+            with patcher_stubbed(self.sync,
+                                 {("--reasoning-config",): "off"},
+                                 {("--reasoning-config",): "refused"}) as calls:
+                summary = self.sync.run_sync(echo=False)
+        finally:
+            self.sync.read_options, self.sync.declared_defaults = orig
+        self.assertEqual(calls, [("run", ("--reasoning-config",), False),
+                                 ("watchdog", {"reasoning_config": True})])
+        self.assertNotIn("未处理", summary)
+        self.assertIn("ZCode 退出时写入", summary)
+
+    def test_hard_failure_is_still_reported(self):
+        """真正的失败（锚点不匹配等）不能被「被拒」这条新分支吞掉。"""
+        orig = self._resolve_only({"reasoning_config": True})
+        try:
+            with patcher_stubbed(self.sync,
+                                 {("--reasoning-config",): "off"},
+                                 {("--reasoning-config",): "fail"}) as calls:
+                summary = self.sync.run_sync(echo=False)
+        finally:
+            self.sync.read_options, self.sync.declared_defaults = orig
+        self.assertIn("未处理", summary)
+        self.assertEqual([c[0] for c in calls], ["run"], "失败不该起看护")
+
+    def test_env_option_keys_are_lowercased(self):
+        """Windows 上 os.environ 的键名是**大写**，读配置时必须归一。
+
+        不归一的话 `ZCODE_PLUGIN_CONFIG_reasoning_config` 会变成 `REASONING_CONFIG`，
+        与开关名对不上 → `{**defaults, **explicit}` 里默认值（全 true）胜出，
+        **用户保存的开关会被整体忽略**（静默失效，最难查）。
+        """
+        from unittest import mock
+        env = {"ZCODE_PLUGIN_CONFIG_REASONING_CONFIG": "false",
+               "ZCODE_PLUGIN_CONFIG_USAGE_CHART": "true"}
+        with mock.patch.dict("os.environ", env, clear=False):
+            opts, source = self.sync.read_options()
+        self.assertEqual(source, "env")
+        self.assertEqual(opts, {"reasoning_config": False, "usage_chart": True})
+
+    def test_watchdog_knows_every_switch(self):
+        """apply_after_exit 的参数表必须覆盖 sync.PATCHES 的每一个键。
+
+        漏一个键的后果：`--want=<键>=on` 被 parse_wants 当「未知开关」忽略，
+        那个开关**开不起来也关不干净**（enhance_prompt 就漏过这一条）。
+        """
+        import apply_after_exit as aae
+        self.assertEqual({k for k, _a, _r in self.sync.PATCHES} - set(aae.PATCH_ARGS),
+                         set(), "apply_after_exit.PATCH_ARGS 漏了开关，退出后看护会静默忽略它")
 
     # ------------------------------------------------------ 会话提示（可见性）
 
@@ -1335,11 +1404,11 @@ class TestAutoInject(unittest.TestCase):
         self.assertIsInstance(data["additionalContext"], str)
         self.assertIn(self.sync.NOTICE_HEAD, data["additionalContext"])
 
-    def test_notice_names_both_injection_paths(self):
-        """提示要讲清「哪些立即生效、哪些要完全退出 ZCode 才写」——否则用户会以为没生效。"""
+    def test_notice_explains_the_exit_requirement(self):
+        """提示要讲清「八项都要完全退出 ZCode 才写入」——否则用户会以为没生效。"""
         notice = self.sync.build_notice()
-        self.assertIn("重启 ZCode", notice)
         self.assertIn("完全退出 ZCode", notice)
+        self.assertIn("自动把 ZCode 重新拉起", notice)
         self.assertIn("doctor.py", notice)
 
     def test_first_auto_inject_fires_exactly_once(self):

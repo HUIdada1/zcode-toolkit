@@ -49,6 +49,15 @@ STAMP = HERE / "_sync.last"
 MARKER = HERE / "_autoinject.done"
 
 # 配置键 -> (zcode_patcher.py 参数, 是否重打包级)
+#
+# **关于「立即写」这条路**：zcode_patcher.py 的运行预检是**全局**的 —— `zcode_running()`
+# 只查 tasklist 里有没有 `ZCode.exe`，与 target 无关；命中就直接 `return 2` 拒绝写入
+# （理由：app.asar 被锁、config.json / provider_config.json 会被客户端回写覆盖）。
+# 而 SessionStart 钩子**必然**在 ZCode 运行中触发，所以标 False 的三项
+# （reasoning_config / usage_chart / model_width）在钩子里永远写不进去 ——
+# 早期版本就是这样：每次装完都报「未处理: xxx(执行失败)」。
+# 现在改成**先试立即写，被拒（refused）就自动转交 apply_after_exit.py**：
+# 桌面端场景退化成「退出时写入」，纯 CLI 场景（没有 ZCode.exe 在跑）仍能即时生效。
 PATCHES = [
     ("reasoning_config", ["--reasoning-config"], False),   # 3.14+ 档位配置（配置侧原生）
     ("usage_chart", ["--usage-chart"], False),
@@ -169,8 +178,13 @@ def declared_defaults() -> dict:
 
 def read_options():
     """读本插件的开关值。返回 (options, source)；source 为 None 表示没找到配置。"""
-    # 宿主若把插件配置注入 hook 环境，优先用环境变量
-    env_opts = _coerce({key[len("ZCODE_PLUGIN_CONFIG_"):]: val
+    # 宿主若把插件配置注入 hook 环境，优先用环境变量。
+    # 键名必须 `.lower()` 归一：Windows 上 os.environ 会把键名**转成大写**
+    # （CPython 对 nt 的实现就是「Env Var Names Must Be UPPERCASE」），
+    # 于是 ZCODE_PLUGIN_CONFIG_reasoning_config 读出来是 REASONING_CONFIG，
+    # 与开关名对不上 → `merged = {**defaults, **explicit}` 里默认值（全 true）胜出，
+    # 用户保存的开关会被**整体忽略**。
+    env_opts = _coerce({key[len("ZCODE_PLUGIN_CONFIG_"):].lower(): val
                         for key, val in os.environ.items()
                         if key.startswith("ZCODE_PLUGIN_CONFIG_")})
     if env_opts:
@@ -222,18 +236,26 @@ def check_state(args) -> str:
     return "unknown"
 
 
-def run_patcher(args, revert: bool) -> bool:
+def run_patcher(args, revert: bool) -> str:
+    """立即执行一次改写。返回 "ok" / "refused" / "fail"。
+
+    `refused` 是独立的一态，不能和 `fail` 混在一起：zcode_patcher.py 在「ZCode 正在运行」
+    时会明确打印拒绝原因并返回 2 —— 这不是失败，而是「现在不能写，等退出后写」，
+    调用方要据此把这项转交给 apply_after_exit.py（见 PATCHES 上方注释）。
+    """
     cmd = [sys.executable, str(PATCHER), *args] + (["--revert"] if revert else [])
     r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace",
                        cwd=str(HERE), timeout=300,
                        env=dict(os.environ, PYTHONIOENCODING="utf-8"))
     out = (r.stdout or "") + (r.stderr or "")
+    refused = r.returncode == 2 or "检测到 ZCode 正在运行" in out
     # zcode_patcher.py 拒绝改写时仍返回 0（只在输出里打 [!] 说明原因），必须看输出判定
-    refused = any(mark in out for mark in ("锚点匹配异常", "拒绝", "[!]"))
-    ok = r.returncode == 0 and not refused
+    rejected = any(mark in out for mark in ("锚点匹配异常", "拒绝", "[!]"))
+    ok = r.returncode == 0 and not rejected
+    verdict = "refused" if refused else ("ok" if ok else "fail")
     log(f"$ zcode_patcher.py {' '.join(args)}{' --revert' if revert else ''} -> "
-        f"{'ok' if ok else ('拒绝改写' if refused else 'FAIL')}\n{out}".rstrip())
-    return ok
+        f"{verdict}\n{out}".rstrip())
+    return verdict
 
 
 def start_watchdog(wanted: dict) -> None:
@@ -301,8 +323,13 @@ def run_sync(echo: bool = False) -> str:
             continue  # 已一致
         if repack:
             deferred[key] = want
-        elif run_patcher(args, revert=need_revert):
+            continue
+        verdict = run_patcher(args, revert=need_revert)
+        if verdict == "ok":
             changed.append(f"{key}→{'开' if want else '关'}")
+        elif verdict == "refused":
+            # 客户端在运行 → 现在写不了，转交退出后看护（这不是失败）
+            deferred[key] = want
         else:
             failed.append(f"{key}(执行失败)")
 
@@ -335,9 +362,10 @@ def build_notice() -> str:
     doctor = HERE / "doctor.py"
     return (
         f"{NOTICE_HEAD}。本次会话启动时已在后台开始同步：\n"
-        "· 用量页去截断、模型弹窗加宽、思考档位配置 —— 直接写入，重启 ZCode 后可见；\n"
-        "· TPS 状态栏、思考强度滑条、增强提示词、模型拉取按钮 —— 需要改写 app.asar，"
-        "会在你**完全退出 ZCode**（托盘图标右键 → 退出）时写入，下次启动即可见。\n"
+        "· 八项补丁（思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、"
+        "增强提示词、模型拉取按钮）都要等你**完全退出 ZCode**（托盘图标右键 → 退出）时才会写入 ——\n"
+        "  客户端运行期间会拒绝改写 app.asar 与 provider_config.json；退出后由看护写入，"
+        "并自动把 ZCode 重新拉起来，再启动即可见。\n"
         "这一条只在首次自动注入时出现。想核对结果可以运行（只读，可选）：\n"
         f'    python "{doctor}"'
     )

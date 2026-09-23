@@ -8,14 +8,14 @@ description: 逐项查看/切换 zcode-tokenspeed 的注入功能开关
 
 | 键 | 功能 | 生效时机 |
 |---|---|---|
-| `reasoning_config` | 思考档位配置（3.14+ 原生 optionSpecs） | 下次会话启动（配置侧，无需重启 ZCode） |
-| `usage_chart` | 用量页去截断 | 下次会话启动（字节级，无需重启 ZCode） |
-| `model_width` | 模型弹窗加宽 | 下次会话启动（字节级） |
-| `tps_footer` | TPS 状态栏 | ZCode 退出时自动应用，重启后生效 |
-| `thought_slider` | 思考强度滑条 | ZCode 退出时自动应用，重启后生效 |
-| `enhance_prompt` | 增强提示词按钮 | ZCode 退出时自动应用，重启后生效 |
-| `model_puller` | 设置页模型拉取按钮 | ZCode 退出时自动应用，重启后生效 |
-| `core_patch` | 思考档位内核补丁（仅 ≤3.11.2，3.14+ 请保持关闭） | 下次会话启动 |
+| `reasoning_config` | 思考档位配置（3.14+ 原生 optionSpecs） | ZCode 退出时自动应用，再启动才生效 |
+| `usage_chart` | 用量页去截断 | ZCode 退出时自动应用，再启动才生效 |
+| `model_width` | 模型弹窗加宽 | ZCode 退出时自动应用，再启动才生效 |
+| `tps_footer` | TPS 状态栏 | ZCode 退出时自动应用，再启动才生效 |
+| `thought_slider` | 思考强度滑条 | ZCode 退出时自动应用，再启动才生效 |
+| `enhance_prompt` | 增强提示词按钮 | ZCode 退出时自动应用，再启动才生效 |
+| `model_puller` | 设置页模型拉取按钮 | ZCode 退出时自动应用，再启动才生效 |
+| `core_patch` | 思考档位内核补丁（仅 ≤3.11.2，3.14+ 请保持关闭） | ZCode 退出时自动应用，再启动才生效 |
 
 **流程**：
 
@@ -25,7 +25,7 @@ description: 逐项查看/切换 zcode-tokenspeed 的注入功能开关
    `--reasoning-config --check`（它列出每个模型当前配了几档、来源是 config 还是已在界面手动配置）。
 3. 问用户要改哪个键、改成什么。用户明确指定后再改。
 4. 改配置：**整份读入 → 只增改目标键 → 写回**，保持 JSON 缩进与其余内容不变；`plugins.options` 或插件 id 那一层不存在时按需创建。**不要动 `enabledPlugins` 等其他字段。**
-5. 告诉用户生效时机（见上表）；字节级的下次会话启动自动生效，重打包级的会在 ZCode 退出时由看护应用。
-6. 若用户想立刻生效而不等下次会话，可以按技能里的「标准执行流程」直接执行对应命令（ZCode 已退出的前提下）。
+5. 告诉用户生效时机（见上表）：**8 项都要等 ZCode 退出后由看护写入，再启动才生效**（zcode_patcher.py 在客户端运行时会直接拒绝写入，而会话钩子必然在运行中触发，所以「会话内立即生效」这条路走不通）。
+6. 若用户想立刻生效而不等下次会话，可以按技能里的「标准执行流程」直接执行对应命令（**前提是 ZCode 已完全退出**）。
 
 **注意**：改 `config.json` 前建议先备份一份（`config.json.bak`）；若 ZCode 正在运行且用户在设置页保存过供应商配置，有被回写的可能，改完提示用户确认一次。

@@ -56,13 +56,16 @@ def resolve_install() -> tuple[Path | None, Path | None]:
     return None, None
 
 
-# 配置键 -> zcode_patcher.py 参数（与 sync.py 的 PATCHES 一一对应）
+# 配置键 -> zcode_patcher.py 参数（与 sync.py 的 PATCHES 一一对应，顺序也保持一致）
+# 漏一个键的后果：`--want=<键>=on` 会被 parse_wants 当「未知开关」忽略，
+# 于是那个开关**开不起来也关不干净**（enhance_prompt 就漏过这一条）。
 PATCH_ARGS = {
     "reasoning_config": ["--reasoning-config"],
     "usage_chart": ["--usage-chart"],
     "model_width": ["--model-width"],
     "tps_footer": ["--tps-footer"],
     "thought_slider": ["--thought-slider"],
+    "enhance_prompt": ["--enhance-prompt"],
     "model_puller": ["--model-puller"],
     "core_patch": [],
 }
