@@ -31,6 +31,12 @@
 
 向后兼容：`enhance_config.json` 不存在或 `providerId/modelId` 留空 = 与旧行为完全一致。
 
+> **档位优先级（发版前已修正）**：⓪热配置 是**真正的最高优先级**，压过界面选择。
+> 初版实现漏了 `!pick` 守卫，①档会在界面取值可读时把 ⓪ 覆盖掉 ——
+> 结果是「配置了却不生效，只有当界面取不到模型时才生效」，与设计意图正好相反。
+> 现在 ①②③ 三档都带 `!pick` 守卫，语义统一为「先到先得」。
+> 回归测试：`tests/test_enhance_handler.py::TestHotConfigResolution`。
+
 ## 三、自定义增强的供应商 / 模型 / 思考强度（改完即生效，零重启）
 
 编辑 `~/.zcode/v2/enhance_config.json`（handler 每次点击都重新读取）：

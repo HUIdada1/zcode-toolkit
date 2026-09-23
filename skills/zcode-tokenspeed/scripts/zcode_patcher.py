@@ -1505,7 +1505,10 @@ let cpid=String(cfg.providerId).trim(),cmid=String(cfg.modelId).trim();
 let cp=byId[cpid];
 if(cp&&usable(cp.p)){pick=cand(cpid,cmid,"config")}}
 // ① 界面直接给的 ref（providerId/modelId）——最准
-if(mv){let k=mv.indexOf("/");
+//    ★ 必须带 !pick 守卫：否则界面选择一旦可读，就会把上面 ⓪ 热配置档覆盖掉，
+//      使「enhance_config.json 指哪打哪」只在界面取值失灵时才生效（自相矛盾）。
+//      ②③ 两档本来就有 !pick，这里补齐才与它们一致。
+if(!pick&&mv){let k=mv.indexOf("/");
 if(k>0){let pid=mv.slice(0,k),mid=mv.slice(k+1);
 if(modelsOf(pid)[mid]){let c=cand(pid,mid,"ref");if(c)pick=c}}}
 // ② 按 ref 的 providerId + 界面显示名，在该供应商内部定位模型
@@ -1551,6 +1554,9 @@ let u=String(pick.p.options.baseURL||"").replace(/\\/+$/,"");
 let k=String(pick.p.options.apiKey||"");
 if(!u)return{success:!1,code:"no-baseurl",error:"供应商「"+pick.pid+"」没有填 Base URL"};
 if(!k)return{success:!1,code:"no-key",error:"供应商「"+pick.pid+"」没有填 API Key"};
+// 把命中档位带到返回值：cand() 已把档名存在 pick.how（config/ref/ref-label/label/fallback）。
+// 排障时 `window.__zenhanceDiag.lastResult.how` 靠它判断走的是哪一档 —— 不赋值会恒为空串。
+how=String(pick.how||"");
 let kind=String(pick.p.kind||"openai-compatible");
 let sys=__SYS__,tpl=__TPL__;
 let user=tpl.split("{input}").join(text);

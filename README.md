@@ -915,7 +915,7 @@ CI（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 / 3.13 上跑这套用�
 ```json
 {
   "name": "zcode-tokenspeed",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "icon": "./assets/icon.png",
   ...
 }
@@ -942,6 +942,23 @@ CI（`.github/workflows/ci.yml`）在 Python 3.10 / 3.12 / 3.13 上跑这套用�
 
 下面是历次全面排查中**确认并修掉**的问题。每一条都配了回归测试，
 且做过**负向验证**（把修复回退后测试会变红）—— 所以这些坑不会悄悄回来。
+
+#### 0.6.4：外部贡献 PR「热配置」的优先级失效 + 档位不上报
+
+`0.6.4` 合并了社区贡献的[增强提示词](skills/zcode-tokenspeed/ENHANCE_CUSTOM_PLAN.md)
+自定义方案（`enhance_config.json` 热配置 + `currentModel()` 锚定 dock）。
+合并时复核发现**两处会让新功能静默失效**的问题，一并修掉：
+
+| # | 问题 | 症状 | 修复 |
+|---|---|---|---|
+| 1 | **⓪热配置档被 ①ref 档覆盖**（新功能的核心缺陷） | ①档写的是 `if(mv){...pick=...}`，**没有 `!pick` 守卫**。⓪档设好热配置后，①档只要界面取值可读就无条件重跑并覆盖它。而同一个 PR 的 `currentModel()` 修复**恰好让界面取值变得可读** → 于是「`enhance_config.json` 指哪打哪」只在取值失灵时才生效，与设计意图完全相反。`tried` 轨迹会显示 `config:P-A/model-a`，请求却发给了 `P-B/model-b` | ①档补上 `!pick` 守卫（②③档本来就有）→ 四档语义统一为**先到先得** |
+| 2 | **`how` 恒为空串**（既有缺陷，新文档依赖它） | `how` 声明在 `let pick=null,how=""` 后**从未被赋值**，成功响应永远返回 `how:""`。而 `ENHANCE_CUSTOM_PLAN.md` 教用户用 `lastResult.how` 判断走的是 `config/ref/fallback` 哪一档 —— 该排障法直接失效 | 命中后回填 `how=String(pick.how||"")` |
+
+> **教训**（与 0.6.1/0.6.2/0.6.3 同源）：**给已有 if 链插最高优先级分支时，
+> 必须同时给后续分支补 `!pick` 守卫**。这类「语法对、位置错」的 bug 行为上完全静默 ——
+> 代码看着就该赢，实际被后面的分支覆盖。回归测试见
+> `tests/test_enhance_handler.py::TestHotConfigResolution` +
+> `TestHotConfigSourceInvariants::test_ref_tier_is_guarded_by_not_pick`。
 
 #### 0.6.3：输出字符串当状态接口（三处同源错误）
 
