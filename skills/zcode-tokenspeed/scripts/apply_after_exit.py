@@ -29,6 +29,11 @@ LOG = HERE / "_apply_after_exit.log"
 POLL_SEC = 3
 MAX_WAIT_SEC = 24 * 3600
 PYTHON = sys.executable or "python"
+#: 子进程超时（秒）。看护是**无人值守**运行的，一旦某个子进程挂死就再也没有人
+#: 会来收拾 —— 表现为「明明退出了却永远不生效」（与 7.5 节那个故障长得一样）。
+#: tasklist 正常 <1s；zcode_patcher 在 311MB asar 上实测 2~3s，给足余量。
+TASKLIST_TIMEOUT = 30
+PATCH_TIMEOUT = 600
 
 
 def log(msg: str) -> None:
@@ -40,8 +45,15 @@ def zcode_running() -> bool:
     # 用 bytes 检索，不走 text 解码：tasklist 输出是 GBK，而本机 Python 为 UTF-8
     # 模式，text=True 会在读线程里抛 UnicodeDecodeError → stdout 变空 → 误判「已退出」。
     # 同理不带 /FI：从 Git Bash/MSYS 环境启动时 "/FI" 会被路径转换破坏。
-    out = subprocess.run(["tasklist"], capture_output=True,
-                         **no_window_kwargs()).stdout or b""
+    # 带 timeout：tasklist 在系统繁忙/WMI 打嗝时可能挂住，看护无人值守，不能无限等。
+    # 超时视为「仍在运行」（保守：宁可多等一轮，也不要在 ZCode 还锁着 asar 时动手）。
+    try:
+        out = subprocess.run(["tasklist"], capture_output=True,
+                             timeout=TASKLIST_TIMEOUT,
+                             **no_window_kwargs()).stdout or b""
+    except subprocess.TimeoutExpired:
+        log(f"tasklist 超时（{TASKLIST_TIMEOUT}s），本轮按「仍在运行」处理")
+        return True
     return b"ZCode.exe" in out
 
 
@@ -113,7 +125,14 @@ def main() -> int:
     failed = 0
     for args, revert in tasks:
         cmd = [PYTHON, str(HERE / "zcode_patcher.py"), *args] + (["--revert"] if revert else [])
-        r = subprocess.run(cmd, capture_output=True, **no_window_kwargs())
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=PATCH_TIMEOUT,
+                               **no_window_kwargs())
+        except subprocess.TimeoutExpired:
+            # 超时 = 这一项没做成。继续跑剩下的项（能写一项是一项），最后计入 failed。
+            log(f"$ zcode_patcher.py {' '.join(cmd[2:])}  [超时 {PATCH_TIMEOUT}s]")
+            failed += 1
+            continue
         out = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace")
         log(f"$ zcode_patcher.py {' '.join(cmd[2:])}  [exit={r.returncode}]\n{out}".rstrip())
         if r.returncode == 2:

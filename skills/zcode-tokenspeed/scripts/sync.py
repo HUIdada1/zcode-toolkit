@@ -27,6 +27,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -128,12 +129,27 @@ def spawn_detached(extra_args: list) -> bool:
         return False
 
 
+def _is_our_key(key) -> bool:
+    """这个配置键是不是本插件的？
+
+    ⚠️ 不能用裸 `startswith("zcode-tokenspeed")`：那会把 **别的插件** 的配置也命中 ——
+    `zcode-tokenspeed-extra`、`zcode-tokenspeed-pro`、`zcode-tokenspeed-lite` 之类
+    同前缀插件一旦同时安装，`_search()` 会先撞上谁取决于 dict 插入顺序，
+    表现为「开关莫名串台」（甚至把别人的配置当自己的开关去注入/还原）。
+
+    宿主的真实配置键形态是 `<插件名>@<市场名>`（见本项目记忆里的既有结论），
+    所以只认两种：精确等于插件名，或 `<插件名>@` 开头。
+    """
+    s = str(key)
+    return s == PLUGIN_ID_PREFIX or s.startswith(PLUGIN_ID_PREFIX + "@")
+
+
 def _search(node, path="", depth=0):
     """在配置树里找本插件的配置对象（键以插件名前缀开头的那一层）。"""
     if depth > 6 or not isinstance(node, dict):
         return None
     for key, val in node.items():
-        if isinstance(val, dict) and val and str(key).startswith(PLUGIN_ID_PREFIX):
+        if isinstance(val, dict) and val and _is_our_key(key):
             return val, f"{path}.{key}"
     for key, val in node.items():
         if isinstance(val, dict):
@@ -163,13 +179,26 @@ def declared_defaults() -> dict:
     退回清单默认值之后，装完重启一次即自动注入，不必打开配置页、不必跑任何命令。
 
     向上找几层是为了兼容三种插件落点（市场根即插件根 / cache 的版本目录 / plugins 子目录）。
+
+    ⚠️ 两道防护，都是为了「别读到**别人的**清单」：
+
+    1. **只找到插件边界为止**（`_plugin_boundary`）—— 原先无条件 `HERE.parents[2:6]`，
+       在仓库布局下会一路走到**盘符根**（`F:\\`）。用户把压缩包解到盘符根是常见操作，
+       一旦那里躺着一个无关的 `.zcode-plugin/plugin.json`，开关默认值就会被它劫持，
+       而且完全不报错。
+    2. **清单必须确实是本插件的**（`name` 对得上）—— 上级目录里出现任何别的清单时，
+       不能因为「它先被扫到」就用它的默认值。
     """
-    for base in list(HERE.parents)[2:6]:
+    for base in _plugin_boundary():
         for rel in (".zcode-plugin/plugin.json", ".claude-plugin/plugin.json"):
             p = base / rel
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
             except Exception:
+                continue
+            # 必须是本插件的清单：`name` 精确等于插件 id（`_is_our_key` 的同一套判定）
+            if not _is_our_key(data.get("name")):
+                log(f"跳过不是本插件的清单（name={data.get('name')!r}）：{p}")
                 continue
             uc = data.get("userConfig")
             if not isinstance(uc, dict):
@@ -180,6 +209,34 @@ def declared_defaults() -> dict:
                 return out
     log("没找到插件清单，取不到默认值")
     return {}
+
+
+def _plugin_boundary() -> list[Path]:
+    """从脚本目录向上返回「可能放着本插件清单」的目录，**到插件边界为止**。
+
+    三种落点（见模块 docstring）对应清单所在层：
+      * 市场根即插件根 : `<市场>/skills/<插件>/scripts` → 清单在 `parents[2]`
+      * cache 版本目录 : `.../<插件>/<版本>/skills/<插件>/scripts` → 清单在 `parents[2]`
+      * plugins 子目录 : `<市场>/plugins/<插件>/skills/<插件>/scripts` → 清单在 `parents[2]`
+
+    所以正常情况下 `parents[2]` 就够了；再往上多找几层只是为历史/异形布局兜底。
+    但**绝不能无限向上**：遇到盘符根（`F:\\`）或文件系统根（`/`）必须停 ——
+    那里出现的同名清单不属于本插件，用它等于让无关文件劫持开关默认值。
+
+    另外一旦发现某个目录**就是**本插件的根（含 `skills/<插件>` 结构），
+    说明已经到边界，再往上只会看到无关目录，直接停。
+    """
+    out: list[Path] = []
+    for base in list(HERE.parents):
+        if base == base.parent:         # 盘符根 / 文件系统根 → 停，绝不参与
+            break
+        out.append(base)
+        # 插件根特征：本目录下直接有 skills/<插件名> → 已到边界，再往上只会看到无关目录
+        if (base / "skills" / PLUGIN_ID_PREFIX).is_dir():
+            break
+        if len(out) >= 6:               # 与原实现的搜索深度保持一致的兜底上限
+            break
+    return out
 
 
 def read_options():
@@ -259,6 +316,35 @@ def check_state(args) -> str:
     return "unknown"
 
 
+# 判定「真的没写成」的**精确**特征串。
+#
+# ⚠️ 这里绝不能用裸 "[!]"：zcode_patcher.py 有 60+ 处 `[!]` 输出，其中不少出现在
+# **完全成功的路径**上，只是提示「顺带发现的问题」，例如：
+#   * `发现 N 个模型同时存在于 providerModelRules 与 manualProviderModelRules…
+#      建议在界面重新保存` —— 这是**事先就存在**的问题，脚本只报告、不修，仍然算成功；
+#   * `备份读取/写入失败`（流程继续）、`integrity 分块数变化，跳过同步`（正常降级）。
+# 早先写成 `any(mark in out for mark in ("锚点匹配异常", "拒绝", "[!]"))`，
+# 后果是「补丁其实写成功了，却被判成 fail」→ summary 报「未处理: xxx(执行失败)」→
+# 用户反复重试、每次都报失败（重试永远不会有别的结果）。实测已复现。
+# 所以：只认「明确的拒绝/异常」特征串 + 退出码 + 汇总行的失败计数。
+REJECT_MARKS = (
+    "锚点匹配异常",
+    "拒绝盲改",
+    "无法安全更新，拒绝",
+    "不符合预期，拒绝",
+)
+
+
+def _summary_failures(out: str) -> int | None:
+    """解析 zcode_patcher.py 汇总行 `合计 N 项：成功 X，失败 Y` 里的 Y。
+
+    这是比任何特征串都可靠的判据：它是脚本**自己**算出来的结论。
+    解析不到（如 --check 之外的输出被截断）返回 None，交由其他判据决定。
+    """
+    m = re.search(r"合计\s*\d+\s*项：\s*成功\s*\d+\s*，\s*失败\s*(\d+)", out)
+    return int(m.group(1)) if m else None
+
+
 def run_patcher(args, revert: bool) -> str:
     """立即执行一次改写。返回 "ok" / "refused" / "fail"。
 
@@ -273,9 +359,15 @@ def run_patcher(args, revert: bool) -> str:
                        **no_window_kwargs())
     out = (r.stdout or "") + (r.stderr or "")
     refused = r.returncode == 2 or "检测到 ZCode 正在运行" in out
-    # zcode_patcher.py 拒绝改写时仍返回 0（只在输出里打 [!] 说明原因），必须看输出判定
-    rejected = any(mark in out for mark in ("锚点匹配异常", "拒绝", "[!]"))
-    ok = r.returncode == 0 and not rejected
+    # zcode_patcher.py 拒绝改写时可能仍返回 0（只在输出里说明原因），必须看输出判定。
+    # 三条判据，任一命中即为 fail（详见 REJECT_MARKS / _summary_failures 的注释）：
+    #   1. 退出码非 0（2 已被 refused 吸收）
+    #   2. 出现明确的「拒绝/异常」特征串
+    #   3. 汇总行自报「失败 N」且 N > 0
+    rejected = any(mark in out for mark in REJECT_MARKS)
+    summary_failed = _summary_failures(out)
+    ok = (r.returncode == 0 and not rejected
+          and not (summary_failed is not None and summary_failed > 0))
     verdict = "refused" if refused else ("ok" if ok else "fail")
     log(f"$ zcode_patcher.py {' '.join(args)}{' --revert' if revert else ''} -> "
         f"{verdict}\n{out}".rstrip())

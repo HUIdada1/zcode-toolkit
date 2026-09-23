@@ -53,6 +53,11 @@ REQUIRED_PY_FILES = [                            # 「构建」要过语法关�
 ]
 PATCHER = SCRIPTS / "zcode_patcher.py"
 
+#: 子进程默认超时（秒）。本脚本会跑 `pip install` / `git clone` 等网络操作，
+#: 没有超时一旦上游半开连接就会**永久挂死**（用户只看到「卡住」）。
+#: 1200s 足够覆盖大依赖安装，又不至于让人无限等。需要更久的场景显式传 timeout=None。
+DEFAULT_TIMEOUT = 1200.0
+
 # 步骤标识 -> 人类可读标题（顺序即默认执行顺序）
 STEP_ORDER = ["env", "install", "build", "test", "status"]
 STEP_TITLES = {
@@ -233,7 +238,8 @@ def print_python_hint(python: str) -> None:
 # --------------------------------------------------------------------------- #
 
 def run(cmd: list[str], *, cwd: Path | None = None, check: bool = True,
-        dry_run: bool = False, quiet: bool = False) -> tuple[int, str]:
+        dry_run: bool = False, quiet: bool = False,
+        timeout: float | None = DEFAULT_TIMEOUT) -> tuple[int, str]:
     """执行子命令，返回 (退出码, 合并后的输出)。
 
     - 一律走列表形式传参，**不经过 shell**，因此路径含空格/中文都安全，
@@ -241,6 +247,11 @@ def run(cmd: list[str], *, cwd: Path | None = None, check: bool = True,
     - Windows 下如果父进程没有控制台，创建 console 子进程会弹出 cmd 窗口，
       因此统一带上 CREATE_NO_WINDOW（本项目 0.5.8 踩过的坑）。
     - 输出一律按 UTF-8 解码并替换非法字节，避免 cp936 管道下 UnicodeDecodeError。
+    - **默认带超时**：本函数要跑 `pip install` / `git clone` 这类网络操作，
+      没有超时的话一旦上游卡住（半开连接、代理不响应）脚本会**永久挂死**，
+      而用户看到的只是「卡住不动」，没有任何可操作的信息。
+      超时返回码约定用 124（与 GNU timeout 一致，便于脚本化判断）。
+      确需长时间的操作可显式传 `timeout=None` 关掉。
     """
     shown = " ".join(_quote(c) for c in cmd)
     if dry_run:
@@ -254,6 +265,7 @@ def run(cmd: list[str], *, cwd: Path | None = None, check: bool = True,
         proc = subprocess.run(
             cmd, cwd=str(cwd) if cwd else None,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=timeout,
             **kwargs,
         )
     except FileNotFoundError as exc:
@@ -261,6 +273,16 @@ def run(cmd: list[str], *, cwd: Path | None = None, check: bool = True,
         if check:
             raise SystemExit(1)
         return 127, ""
+    except subprocess.TimeoutExpired as exc:
+        # 已经产出的部分输出对排查很有价值（例如 pip 卡在哪个包），尽量带出来
+        partial = (exc.stdout or b"").decode("utf-8", errors="replace")
+        if partial.strip():
+            for line in partial.rstrip().splitlines():
+                print(f"    {line}")
+        fail(f"命令超时（{timeout}s）：{shown}")
+        if check:
+            raise SystemExit(124)
+        return 124, partial
     except OSError as exc:
         fail(f"无法执行 {cmd[0]}：{exc}")
         if check:
@@ -414,8 +436,8 @@ def step_test(args) -> None:
     ok("回归测试全部通过")
 
     # 滑条专项冒烟（需要 Node，可选）
-    # 注意：slider_smoke.js 需要把「被测脚本路径」作为第 1 个参数传进去，
-    # 直接 `node slider_smoke.js` 会因 process.argv[2] 为 undefined 而崩。
+    # 注意：slider_smoke.js 要求把「被测脚本路径」作为第 1 个参数传进来；
+    # 缺参数时它自己会打「用法」提示并退 2（0.6.3 起不再抛裸堆栈）。
     smoke = TESTS / "slider_smoke.js"
     target = SCRIPTS / "zcode-thought-slider.js"
     node = find_node()

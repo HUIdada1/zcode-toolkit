@@ -39,7 +39,6 @@ import json
 import os
 import re
 import socket
-import sys
 import time
 import urllib.error
 import urllib.request

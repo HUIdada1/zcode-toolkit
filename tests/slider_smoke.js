@@ -8,7 +8,24 @@
 const fs = require("fs");
 const vm = require("vm");
 
-const src = fs.readFileSync(process.argv[2], "utf8");
+const target = process.argv[2];
+if (!target) {
+  // 缺参数时给一句可操作的提示，而不是把 readFileSync 的裸堆栈甩出来。
+  // （这个坑真发生过：有人直接 `node slider_smoke.js`，看到
+  //   `TypeError: The "path" argument must be of type string... Received undefined`
+  //   完全不知道缺的是「被测脚本路径」。）
+  console.error("用法：node tests/slider_smoke.js <zcode-thought-slider.js 的路径>");
+  console.error("例如：node tests/slider_smoke.js skills/zcode-tokenspeed/scripts/zcode-thought-slider.js");
+  process.exit(2);
+}
+let src;
+try {
+  src = fs.readFileSync(target, "utf8");
+} catch (err) {
+  console.error("读不到被测脚本：" + target);
+  console.error("  " + err.message);
+  process.exit(2);
+}
 
 function makeStyle() {
   return { cssText: "", setProperty() {}, removeProperty() {} };

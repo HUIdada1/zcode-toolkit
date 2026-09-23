@@ -1255,6 +1255,25 @@ class TestSliderScript(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"冒烟测试失败：{(r.stdout + r.stderr)[:400]}")
         self.assertIn("smoke OK", r.stdout)
 
+    def test_smoke_without_argument_fails_helpfully(self):
+        """缺参数时必须给「用法」提示并退 2，而不是把 readFileSync 的裸堆栈甩给用户。
+
+        这个坑真实发生过：直接 `node tests/slider_smoke.js` 会看到
+        `TypeError: The "path" argument must be of type string... Received undefined`，
+        完全看不出缺的是「被测脚本路径」——排查成本全在不必要的猜测上。
+        """
+        r = self._node(str(self.smoke))
+        self.assertEqual(r.returncode, 2, "缺参数应以退出码 2 结束（区别于测试失败）")
+        self.assertIn("用法", r.stderr + r.stdout)
+        self.assertNotIn("ERR_INVALID_ARG_TYPE", r.stderr,
+                         "不该把 Node 的裸异常甩出来")
+
+    def test_smoke_with_missing_file_fails_helpfully(self):
+        """文件不存在时也要友好报错，而不是 traceback。"""
+        r = self._node(str(self.smoke), str(self.smoke.parent / "no-such-file.js"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("读不到被测脚本", r.stderr + r.stdout)
+
 
 class TestEnhancePromptScript(unittest.TestCase):
     """润色按钮的挂载逻辑：按钮绝不能渲染到会话消息区。
@@ -1669,6 +1688,227 @@ class TestSyncStaleIsReinjected(unittest.TestCase):
         self.assertNotIn("重注入为新版", summary)
 
 
+class TestRunPatcherVerdict(unittest.TestCase):
+    """★ 回归：`run_patcher()` 不能用裸 `[!]` 判失败（0.6.3 修复）。
+
+    `zcode_patcher.py` 有 60+ 处 `[!]` 输出，其中相当一部分出现在**完全成功的路径**上，
+    只是顺带提示「发现的问题」：
+
+      * `发现 N 个模型同时存在于 providerModelRules 与 manualProviderModelRules…
+        建议在界面重新保存` —— 这是**事先就存在**的问题，脚本只报告、不修，仍算成功；
+      * `备份读取/写入失败`（流程继续）、`integrity 分块数变化，跳过同步`（正常降级）。
+
+    修复前 `rejected = any(mark in out for mark in ("锚点匹配异常", "拒绝", "[!]"))`
+    会把这类**成功**判成 `fail`。后果特别隐蔽：补丁其实写进去了，界面却报
+    「未处理: xxx(执行失败)」，用户反复重试、每次都报失败 —— 重试永远不会有别的结果。
+
+    实测复现（修复前）：退出码 0 + 汇总「失败 0」+ 一条良性 `[!]` → 判为 `fail`。
+    """
+
+    def setUp(self):
+        import sync
+        self.sync = sync
+
+    def _verdict(self, out: str, rc: int = 0) -> str:
+        orig = self.sync.subprocess.run
+
+        class _R:
+            returncode = rc
+            stdout = out
+            stderr = ""
+
+        self.sync.subprocess.run = lambda *a, **k: _R()
+        try:
+            return self.sync.run_patcher(["--reasoning-config"], revert=False)
+        finally:
+            self.sync.subprocess.run = orig
+
+    _BENIGN = ("    [!] 发现 2 个模型同时存在于 providerModelRules 与 "
+               "manualProviderModelRules —— 内核会因此把整份供应商配置降级为空，"
+               "建议在界面重新保存该供应商或手工清理：a/x, b/y\n"
+               "    已写入 3 个模型的档位\n"
+               "  合计 1 项：成功 1，失败 0\n")
+
+    def test_benign_bang_is_not_a_failure(self):
+        """核心回归：成功路径上的良性 `[!]` 不能被当成失败。"""
+        self.assertEqual(self._verdict(self._BENIGN), "ok",
+                         "良性 [!]（预先存在的重复模型警告）被误判成 fail")
+
+    def test_benign_bang_with_integrity_skip_message(self):
+        """另一类良性 `[!]`：integrity 分块数变化时的「跳过同步」提示，属正常降级。"""
+        out = ("    [!] out/renderer/zcode-tps.js 的分块数变化，跳过 integrity 同步\n"
+               "  合计 1 项：成功 1，失败 0\n")
+        self.assertEqual(self._verdict(out), "ok")
+
+    def test_explicit_reject_marks_still_fail(self):
+        """反向保护：明确的「拒绝/异常」特征串**必须**仍然判失败。"""
+        for mark in ("锚点匹配异常", "拒绝盲改", "无法安全更新，拒绝"):
+            with self.subTest(mark=mark):
+                out = f"    [!] {mark}（期望恰有一版=1）\n  合计 1 项：成功 0，失败 1\n"
+                self.assertEqual(self._verdict(out), "fail", f"{mark} 应判 fail")
+
+    def test_summary_failure_count_is_respected(self):
+        """汇总行自报的失败计数是最可靠判据：脚本自己算出来的结论。"""
+        self.assertEqual(
+            self._verdict("  合计 1 项：成功 0，失败 1\n"), "fail")
+        self.assertEqual(
+            self._verdict("  合计 3 项：成功 3，失败 0\n"), "ok")
+
+    def test_nonzero_exit_code_fails(self):
+        self.assertEqual(self._verdict("  合计 1 项：成功 0，失败 1\n", rc=1), "fail")
+
+    def test_refused_stays_distinct_from_fail(self):
+        """`refused` 必须独立：它意味着「现在不能写，等退出后写」，不是失败。"""
+        out = "[!] 检测到 ZCode 正在运行 —— 打补丁/还原前请完全退出 ZCode\n"
+        self.assertEqual(self._verdict(out, rc=2), "refused",
+                         "被运行守卫拒绝不能记成 fail（否则不会转交看护）")
+
+    def test_no_summary_line_is_not_a_failure_by_default(self):
+        """兜底：输出里没有汇总行（格式变了）且无拒绝特征串 → 不该凭猜判失败。"""
+        self.assertEqual(self._verdict("  √ 增强提示词注入   app.asar\n"), "ok")
+
+    def test_summary_parser_handles_spacing_variants(self):
+        """汇总行的空格形态可能变（中英文混排），解析要稳。"""
+        for text, want in (("合计 1 项：成功 0，失败 2", 2),
+                           ("合计  4  项： 成功  4 ， 失败  0", 0),
+                           ("完全不像汇总行", None)):
+            with self.subTest(text=text):
+                self.assertEqual(self.sync._summary_failures(text), want)
+
+    def test_source_no_longer_uses_bare_bang(self):
+        """源码层面钉死：判据里不许再出现裸 `"[!]"`。
+
+        上面几条靠打桩喂字符串验证语义；这条直接查源码，
+        防止有人「顺手」把宽泛判据加回来（加回来后单测会红，但这条报错更直指根因）。
+        """
+        import inspect
+        src = inspect.getsource(self.sync.run_patcher)
+        self.assertNotIn('"[!]"', src,
+                         "run_patcher 的判据里又出现了裸 [!] —— "
+                         "zcode_patcher.py 有 60+ 处 [!]，其中多处在成功路径上")
+
+class TestSearchMatchesOnlyOurPlugin(unittest.TestCase):
+    """★ 回归：配置树查找必须只认**本插件**的键（0.6.3 修复）。
+
+    原实现 `str(key).startswith("zcode-tokenspeed")` 会把 **别的插件**也命中：
+    `zcode-tokenspeed-extra`、`zcode-tokenspeed-pro`、`zcode-tokenspeed-lite` 之类
+    同前缀插件一旦同时安装，`_search()` 撞上谁取决于 dict 的插入顺序 → 表现为
+    「开关莫名串台」：把别人的配置当自己的开关去注入/还原，而且**不报任何错**。
+
+    宿主的真实配置键形态是 `<插件名>@<市场名>`，所以只认「精确等于插件名」
+    或「`<插件名>@` 开头」两种。
+    """
+
+    def setUp(self):
+        import sync
+        self.sync = sync
+
+    def test_accepts_real_host_key_forms(self):
+        for key in ("zcode-tokenspeed@dev-abc123",      # dev 市场
+                    "zcode-tokenspeed@zcode-toolkit",   # 本机仓库即市场
+                    "zcode-tokenspeed"):                # 无市场后缀
+            with self.subTest(key=key):
+                self.assertTrue(self.sync._is_our_key(key), f"{key} 应被接受")
+
+    def test_rejects_same_prefix_other_plugins(self):
+        """核心回归：同前缀的**别的插件**不能被认领。"""
+        for key in ("zcode-tokenspeed-extra@mkt", "zcode-tokenspeed-pro",
+                    "zcode-tokenspeed-lite@mkt", "zcode-tokenspeedfoo",
+                    "my-zcode-tokenspeed@mkt"):
+            with self.subTest(key=key):
+                self.assertFalse(self.sync._is_our_key(key),
+                                 f"{key} 是别的插件/别的位置，不该被认领")
+
+    def test_search_picks_our_entry_not_the_same_prefix_one(self):
+        """端到端：两份同前缀配置同时存在时，必须命中**我们自己**那份。
+
+        注意把 -extra 放在前面 —— 修复前的实现会先撞上它。
+        """
+        cfg = {"plugins": {
+            "zcode-tokenspeed-extra@mkt": {"reasoning_config": False, "enhance_prompt": False},
+            "zcode-tokenspeed@mkt": {"reasoning_config": True, "enhance_prompt": True},
+        }}
+        got = self.sync._search(cfg, "config.json")
+        self.assertIsNotNone(got, "应能找到本插件配置")
+        val, path = got
+        self.assertEqual(path, "config.json.plugins.zcode-tokenspeed@mkt")
+        self.assertTrue(val["enhance_prompt"], "命中串到了 -extra 那份（开关会串台）")
+
+    def test_search_returns_none_when_only_other_plugins_present(self):
+        """只有同前缀的**别的插件**时，不能认领 —— 否则会拿别人的配置去注入。"""
+        cfg = {"plugins": {"zcode-tokenspeed-extra@mkt": {"reasoning_config": True}}}
+        self.assertIsNone(self.sync._search(cfg, "config.json"))
+
+
+class TestPluginBoundaryStopsAtPluginRoot(unittest.TestCase):
+    """★ 回归：向上找插件清单必须**到插件根为止**（0.6.3 修复）。
+
+    原实现无条件 `list(HERE.parents)[2:6]`。在仓库布局下（市场根即插件根）
+    `parents` 只有 5 层，于是搜索范围会一路包含 **盘符根**（`F:\\`）。
+    用户把压缩包解到盘符根是很常见的操作 —— 一旦那里躺着一个无关的
+    `.zcode-plugin/plugin.json`，`declared_defaults()` 就会用**它的** `userConfig`
+    决定本插件的开关默认值，而且**完全不报错**（只表现为「开关状态莫名其妙」）。
+
+    另外还加了「清单必须是本插件的」校验：上级目录里出现任何别的清单时，
+    不能因为「它先被扫到」就用它的默认值。
+    """
+
+    def setUp(self):
+        import sync
+        self.sync = sync
+
+    def test_boundary_never_includes_filesystem_root(self):
+        """盘符根 / 文件系统根绝不能出现在搜索范围内。"""
+        for p in self.sync._plugin_boundary():
+            self.assertNotEqual(p, p.parent,
+                                f"边界里出现了文件系统根：{p}")
+            self.assertTrue(p.is_dir(), f"边界项应是已存在目录：{p}")
+
+    def test_boundary_stops_at_the_plugin_root(self):
+        """本仓库布局下，第一处「含 skills/<插件名>」的目录就是插件根，必须到此为止。
+
+        它后面的目录（skills/ 的父、盘的父……）都只可能放着无关清单。
+        """
+        b = self.sync._plugin_boundary()
+        roots = [p for p in b if (p / "skills" / self.sync.PLUGIN_ID_PREFIX).is_dir()]
+        self.assertTrue(roots, "应能识别出插件根（含 skills/<插件名>）")
+        self.assertIn(roots[0], b, "插件根必须在搜索范围内")
+        # 插件根之后不应再有更上层目录
+        self.assertEqual(b[-1], roots[0],
+                         f"插件根 {roots[0]} 之后仍继续向上找了：{b}")
+
+    def test_repo_layout_still_finds_defaults(self):
+        """对照组：边界收紧后，本仓库仍必须能正常取到默认值（不能修坏）。"""
+        d = self.sync.declared_defaults()
+        self.assertTrue(d, "本仓库应能读到插件清单默认值")
+        self.assertIn("enhance_prompt", d)
+        self.assertTrue(all(isinstance(v, bool) for v in d.values()))
+
+    def test_manifest_of_another_plugin_is_skipped(self):
+        """上级目录里出现别人的清单时，必须跳过而不是拿它的默认值。"""
+        tmp = tempfile.TemporaryDirectory(prefix="zpatch-boundary-",
+                                          ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        # 造一个「别的插件」的清单放在某层，name 对不上
+        (d / ".zcode-plugin").mkdir(parents=True)
+        (d / ".zcode-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "some-other-plugin",
+                        "userConfig": {"enhance_prompt": {"default": False}}}),
+            encoding="utf-8")
+        orig = self.sync.HERE
+        # 让脚本目录位于 d/x/y/scripts，使 d 落在向上搜索范围内
+        sd = d / "x" / "y" / "scripts"
+        sd.mkdir(parents=True)
+        self.sync.HERE = sd
+        try:
+            got = self.sync.declared_defaults()
+        finally:
+            self.sync.HERE = orig
+        self.assertNotIn("enhance_prompt", got,
+                         "用了别的插件的清单（name 校验失效）")
+
+
 class TestAutoInject(unittest.TestCase):
     """零配置自动注入 —— 「从插件市场装完就能用」这条要求就靠它落地。
 
@@ -1728,7 +1968,8 @@ class TestAutoInject(unittest.TestCase):
         root = self._d / "plug"
         (root / ".zcode-plugin").mkdir(parents=True)
         (root / ".zcode-plugin" / "plugin.json").write_text(json.dumps({
-            "name": "x",
+            # name 必须是本插件（0.6.3 起会校验，防止拿到上级目录里别人的清单）
+            "name": "zcode-tokenspeed",
             "userConfig": {"a": {"default": True}, "b": {"default": "high"},
                            "c": {"default": False}, "d": {"no_default": 1}},
         }), encoding="utf-8")
@@ -2534,6 +2775,85 @@ class TestDoctorWatchdogSection(unittest.TestCase):
         for phrase in ("看护启动，等待 ZCode 退出", "ZCode 已退出（等待", "DONE",
                        "已再次运行", "等待超时"):
             self.assertIn(phrase, text, f"apply_after_exit.py 改变了措辞：{phrase}")
+
+
+class TestSubprocessTimeouts(unittest.TestCase):
+    """★ 回归：所有会阻塞的 `subprocess.run` 都必须带 `timeout=`（0.6.3 修复）。
+
+    这两处此前没有超时，而它们跑在**无人值守**路径上，一旦挂死就再也没有人来收拾：
+
+      * `bootstrap.py` 的 `run()` —— 要跑 `pip install` / `git clone`。
+        上游半开连接（代理不响应、registry 卡住）时进程**永久挂起**，
+        用户只看到「卡住不动」，没有任何可操作信息，只能强杀。
+        现在默认 1200s，超时返回 124（与 GNU timeout 一致），并把已产出的部分输出
+        一起带出来（例如 pip 卡在哪个包），便于定位。
+
+      * `apply_after_exit.py` 的两处 —— 看护是后台无人值守进程，
+        `tasklist` 可被 WMI 打嗝挂住、`zcode_patcher.py` 可在被锁的 asar 上挂住。
+        现象会和「7.5 节：看护从未等到退出」长得一模一样，极难区分。
+        现在 `tasklist` 30s（超时按「仍在运行」保守处理）、补丁 600s。
+
+    用 AST 扫源码而不是行为测试：超时行为要真的挂 20 分钟才测得出来，
+    但「有没有写 timeout=」是静态可判定的，而且这正是会被人手滑删掉的东西。
+    """
+
+    SCRIPTS = (Path(__file__).resolve().parent.parent
+               / "skills" / "zcode-tokenspeed" / "scripts")
+
+    def _runs_without_timeout(self, path: Path) -> list[int]:
+        """返回该文件里所有「缺 timeout=」的 subprocess.run 的行号。"""
+        import ast
+        src = path.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        lines = src.splitlines()
+        missing = []
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            if not (isinstance(f, ast.Attribute) and f.attr == "run"
+                    and isinstance(f.value, ast.Name) and f.value.id == "subprocess"):
+                continue
+            if "timeout" in {k.arg for k in n.keywords}:
+                continue
+            seg = "\n".join(lines[n.lineno - 1: n.end_lineno])
+            if "timeout" in seg:          # 跨行写在同一调用里
+                continue
+            missing.append(n.lineno)
+        return missing
+
+    def test_apply_after_exit_has_all_timeouts(self):
+        """看护是无人值守进程，任何一个子进程都不允许无限等。"""
+        missing = self._runs_without_timeout(self.SCRIPTS / "apply_after_exit.py")
+        self.assertEqual(missing, [],
+                         f"apply_after_exit.py 第 {missing} 行的 subprocess.run 缺 timeout=")
+
+    def test_bootstrap_runner_has_timeout(self):
+        """bootstrap 的 run() 要跑网络安装，必须有超时（默认值即可）。"""
+        missing = self._runs_without_timeout(Path(__file__).resolve().parent.parent
+                                            / "bootstrap.py")
+        self.assertEqual(missing, [],
+                         f"bootstrap.py 第 {missing} 行的 subprocess.run 缺 timeout=")
+
+    def test_bootstrap_handles_timeout_expired(self):
+        """有超时还不够 —— 必须**处理** TimeoutExpired，否则异常直接冒到用户面前。"""
+        src = (Path(__file__).resolve().parent.parent / "bootstrap.py").read_text(encoding="utf-8")
+        self.assertIn("subprocess.TimeoutExpired", src,
+                      "bootstrap.py 没有捕获 TimeoutExpired：超时会抛裸异常")
+        self.assertIn("DEFAULT_TIMEOUT", src, "缺少默认超时常量")
+        self.assertIn("124", src, "超时的返回码约定应为 124（与 GNU timeout 一致）")
+
+    def test_watchdog_tasklist_timeout_is_conservative(self):
+        """tasklist 超时必须按「仍在运行」处理。
+
+        反过来（当成已退出）会在 ZCode 还锁着 app.asar 时动手写 —— 直接触发
+        WinError 5，而且此时看护已经错过退出时机，补丁永远写不进去。
+        宁可多等一轮轮询。
+        """
+        src = (self.SCRIPTS / "apply_after_exit.py").read_text(encoding="utf-8")
+        self.assertIn("TASKLIST_TIMEOUT", src)
+        self.assertIn("return True", src,
+                      "tasklist 超时分支必须 return True（视为仍在运行）")
 
 
 class TestPluginHookSpec(unittest.TestCase):
