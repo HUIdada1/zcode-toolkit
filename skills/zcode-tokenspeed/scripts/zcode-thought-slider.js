@@ -6,17 +6,17 @@
  *        └─点击→ 弹出面板(260ms 弹出动效):
  *          ┌────────────────────────────┐
  *          │ 思考强度               high │
- *          │ (人) [▬▬▬][▬▬▬][▬▬▬][    ] │ ← 分段轨道:每档一段,点/拖/←→ 切换
+ *          │ [▬▬▬][▬▬▬][▬▬▬][    ]      │ ← 分段轨道:每档一段,点/拖/←→ 切换
  *          └────────────────────────────┘
  *   点外部 / Esc 收起;原生下拉经 CSS 隐藏(单档位固定徽章除外),状态仍双向同步。
  *
  * 轨道形态:
- *   小人 = 轨道左侧的**固定前缀图标**(不再跟随档位左右移动);轨道 = N 段等宽胶囊,
+ *   轨道 = N 段等宽胶囊(16px 加粗,填充层带顶部高光+底部投影的立体光泽),
  *   每段内含填充层 .zslider-fill,width 0↔100% 即「分段点亮」,--zs-stagger 让各段错开。
  *   段数默认 = 可用档位数(可用 __zsliderCtl.setSegments 强制)。
  *   四态(写在 track 的 data-zs):loading 扫入+扫光 / dragging 跟手增辉 /
- *   settling 小人回弹+涟漪 / idle 静止(末段外发光呼吸)。
- *   与 data-zs 正交的 data-thinking(1/0):思考中激活段流动(zsFlow)+小人跑步,空闲定格站立帧。
+ *   settling 涟漪 / idle 静止(末段外发光呼吸)。
+ *   与 data-zs 正交的 data-thinking(1/0):思考中激活段流动(zsFlow),空闲定格。
  *
  * 数据源(全部只读 DOM,零协议逆向):
  *   - 状态探针:V4ComposerToolbar 渲染的隐藏 span(className:"hidden"),
@@ -77,8 +77,8 @@
       + "--zs-flare-blend:normal;"
       + "--zs-glass:rgba(255,255,255,.75);--zs-border:rgba(15,23,42,.10);--zs-chip:rgba(15,23,42,.06);"
       + "--zs-shadow:0 12px 30px rgba(15,23,42,.16),0 2px 8px rgba(15,23,42,.10);"
-      + "--zs-r-panel:14px;--zs-r-pill:999px;--zs-h:8px;"
-      + "--zs-gap:4px;--zs-seg:rgba(92,104,128,.22);"
+      + "--zs-r-panel:14px;--zs-r-pill:999px;--zs-h:16px;"
+      + "--zs-gap:5px;--zs-seg:rgba(92,104,128,.22);"
       + "--zs-dur:260ms;--zs-ease:cubic-bezier(.2,.8,.2,1)}";
     const VARS_DARK = "{"
       + "--zs-bg:#191c22;--zs-fg:#e9ecf1;--zs-dim:#9aa3b2;--zs-accent:#e0983a;"
@@ -88,8 +88,8 @@
       + "--zs-dot:rgba(165,175,196,.45);--zs-shimmer:rgba(255,255,255,.55);"
       + "--zs-flare:radial-gradient(ellipse at 100% 50%,rgba(255,255,255,.95) 0 4%,rgba(188,189,255,.8) 11%,rgba(106,87,255,.5) 28%,rgba(105,31,255,.2) 49%,transparent 74%);"
       + "--zs-flare-blend:screen;"
-      + "--zs-glass:rgba(24,27,34,.66);--zs-border:rgba(255,255,255,.12);--zs-chip:rgba(255,255,255,.08);"
-      + "--zs-seg:rgba(165,175,196,.26);"
+      + "--zs-glass:rgba(24,27,34,.66);--zs-border:rgba(255,255,255,.16);--zs-chip:rgba(255,255,255,.08);"
+      + "--zs-seg:rgba(178,188,208,.34);"
       + "--zs-shadow:0 14px 42px rgba(0,0,0,.45),0 3px 10px rgba(0,0,0,.22)}";
     st.textContent = [
       '[data-composer-thought-control]:not([data-thought-level-fixed="true"]){display:none!important}',
@@ -112,11 +112,21 @@
       ".zslider-track:hover .zslider-rail{filter:brightness(1.06) saturate(1.05)}",
       "/* 段：弱化底（未激活时看到的就是它）；内部 fill 宽度 0↔100% 即分段填充过渡 */",
       ".zslider-seg{position:relative;flex:1 1 0;min-width:0;height:100%;"
-        + "border-radius:var(--zs-r-pill);background:var(--zs-seg);overflow:hidden}",
-      "/* 填充层沿用旧类名：width 过渡 + stagger 延迟做出逐段点亮的层次 */",
+        + "border-radius:var(--zs-r-pill);background:var(--zs-seg);overflow:hidden;"
+        + "box-shadow:inset 0 1px 2px rgba(0,0,0,.16),inset 0 -1px 0 rgba(255,255,255,.10)}",
+      "/* 填充层沿用旧类名：width 过渡 + stagger 延迟做出逐段点亮的层次；"
+        + "内高光 + 外投影让加粗后的胶囊立起来 */",
       ".zslider-fill{border-radius:var(--zs-r-pill)!important;"
+        + "box-shadow:inset 0 1px 1px rgba(255,255,255,.6),inset 0 -1.5px 2px rgba(0,0,0,.28),"
+        + "0 2px 5px rgba(0,0,0,.22);"
         + "transition:width var(--zs-dur) var(--zs-ease) var(--zs-stagger,0ms)}",
-      ".zslider-track.is-dragging .zslider-fill{filter:saturate(1.3) brightness(1.18);"
+      "/* 光泽层：顶部亮 → 中部透 → 底部压深；对比度刻意拉大，避免加粗后成为整块平涂 */",
+      ".zslider-fill::after{content:'';position:absolute;inset:0;border-radius:inherit;"
+        + "pointer-events:none;"
+        + "background:linear-gradient(180deg,rgba(255,255,255,.72) 0%,rgba(255,255,255,.30) 32%,"
+        + "rgba(255,255,255,.04) 52%,rgba(0,0,0,.10) 74%,rgba(0,0,0,.30) 100%)}",
+      ".zslider-track.is-dragging .zslider-fill{filter:saturate(1.35) brightness(1.22) "
+        + "drop-shadow(0 0 5px rgba(125,211,252,.45));"
         + "transition-delay:0ms!important;animation:none!important}",
       "/* 思考中：激活段依次流动（延迟复用 --zs-stagger，与点亮同一套错开节奏） */",
       "@keyframes zsFlow{0%,100%{opacity:.6}50%{opacity:1}}",
@@ -125,8 +135,6 @@
       "/* 段弹入：从左向右逐段展开（旧刻度点的级联弹入改挂到段上） */",
       "@keyframes zsSegIn{from{transform:scaleX(.15);opacity:0}to{transform:scaleX(1);opacity:1}}",
       ".zslider-seg{transform-origin:left center}",
-      "/* 小人前缀图标：不再跟随滑块（分段轨道没有连续位置），固定在轨道左侧 */",
-      ".zslider-knob{position:static;flex:0 0 auto;width:22px;height:22px;transform:none}",
       ".zslider-flare{position:absolute;top:50%;left:var(--zp,0%);width:56px;height:26px;border-radius:50%;"
         + "transform:translate(-100%,-50%);background:var(--zs-flare);"
         + "mix-blend-mode:var(--zs-flare-blend);filter:blur(2px) saturate(1.2);"
@@ -144,9 +152,6 @@
         + "50%{box-shadow:0 0 10px 1px rgba(125,211,252,.55)}}",
       ".zslider-track[data-top][data-zs='idle']:not([data-thinking='1']) .zslider-seg:last-child .zslider-fill"
         + "{animation:zsBreathe 2.6s ease-in-out infinite}",
-      "/* 完成：小人回弹一下（小人是 flex 前缀项，不再需要 translate 居中） */",
-      "@keyframes zsKnobPop{0%{transform:scale(1)}42%{transform:scale(1.18)}100%{transform:scale(1)}}",
-      ".zslider-track[data-zs='settling'] .zslider-knob{animation:zsKnobPop .42s var(--zs-ease)}",
       "@keyframes zsliderIn{from{opacity:0;transform:translateY(10px) scale(.85);filter:blur(6px)}60%{filter:blur(0)}to{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}}",
       "@keyframes zsliderOut{from{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}to{opacity:0;transform:translateY(5px) scale(.96);filter:blur(4px)}}",
       "@keyframes zsliderPulse{0%{transform:scale(1)}40%{transform:scale(1.28)}100%{transform:scale(1)}}",
@@ -154,7 +159,7 @@
       "/* 响应式：窄屏收紧圆角；触控放大热区到 40px */",
       "@media (max-width:420px){:root{--zs-r-panel:12px}}",
       "@media (pointer:coarse){.zslider-track{height:40px!important}}",
-      "/* 减弱动效：时长归零、动画全关（原来只有奔跑小人遵守） */",
+      "/* 减弱动效：时长归零、动画全关 */",
       "@media (prefers-reduced-motion: reduce){:root{--zs-dur:0ms}"
         + ".zslider-panel,.zslider-track,.zslider-track *{animation:none!important}}",
     ].join("\n");
@@ -363,7 +368,7 @@
   //   dragging 拖拽中     —— 跟手、逐段点亮不延迟
   //   settling 已落位     —— 涟漪
   //   idle     静止/暂停   —— max 档最后一段外发光呼吸
-  // 与 data-zs 正交的还有 data-thinking(1/0)：思考中激活段流动、小人跑步。
+  // 与 data-zs 正交的还有 data-thinking(1/0)：思考中激活段流动，空闲定格。
   function setPhase(v) {
     if (track && track.isConnected) track.dataset.zs = v;
   }
@@ -417,82 +422,6 @@
     // 新面板的 track 还没有 data-thinking（cur === undefined），这里必须补写：
     // 否则"状态没变就早退"会让新面板的流动动画永远不生效
     if (track && track.isConnected) track.dataset.thinking = b ? "1" : "0";
-    runnerSetMode();   // 思考中跑步 / 空闲定格站立帧
-  }
-
-  // ---------- 八帧奔跑小人(滑块按钮) ----------
-  // 参数化火柴人跑步循环:大腿按正弦摆动、后摆相膝弯大、手臂与对侧腿同相,身体随步频轻微起伏。
-  // 拖动越快 rate 越高(帧/秒),松手后以固定减速度自然停下。
-  const runner = { el: null, svg: null, frame: 0, progress: 0, raf: 0, last: 0 };
-  const IDLE_FRAME_MS = 90;     // 空闲循环 720ms / 8 帧(dsh 规格)
-  const DRAG_FRAME_MS = 52.5;   // 拖拽循环 420ms / 8 帧
-  const THINK_FRAME_MS = 62;    // 思考中循环 ~500ms / 8 帧(比空闲快、比拖拽慢)
-  const REDUCED = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-  function pt(o, deg, len) {   // deg: 90=竖直向下, 正角向前(右)
-    const r = deg * Math.PI / 180;
-    return [o[0] + len * Math.sin(r), o[1] + len * Math.cos(r)];
-  }
-  const f1 = (n) => Number(n).toFixed(1);
-  function seg(a, b, extra) {
-    return `<line x1="${f1(a[0])}" y1="${f1(a[1])}" x2="${f1(b[0])}" y2="${f1(b[1])}" stroke="#fff" stroke-opacity="${(extra && extra.op) || 0.95}" stroke-width="${(extra && extra.w) || 2.4}" stroke-linecap="round"/>`;
-  }
-
-  function runnerSVG(frame) {
-    const t = frame / 8 * 2 * Math.PI;
-    const bob = Math.abs(Math.sin(t)) * 1.2;                    // 跑步身体起伏
-    const hip = [11.6, 14.4 - bob];
-    const sh = [12.2, 8.4 - bob];                               // 肩(躯干微前倾)
-    const parts = [`<circle cx="${f1(12.9)}" cy="${f1(5.6 - bob)}" r="2.5" fill="#fff"/>`];
-    parts.push(seg([hip[0] + 0.4, hip[1]], sh, { op: 0.95 }));  // 躯干
-    for (const ph of [t, t + Math.PI]) {                        // 两腿相位差 π
-      const thigh = 42 * Math.sin(ph);                          // 大腿摆角
-      const bend = 18 + 34 * Math.max(0, -Math.sin(ph));        // 后摆相膝弯更大
-      const knee = pt(hip, 90 + thigh, 5.4);
-      const foot = pt(knee, 90 + thigh + bend, 5.2);
-      parts.push(seg(hip, knee, { op: 0.8 }), seg(knee, foot));
-    }
-    for (const ph of [t + Math.PI, t]) {                        // 手臂与对侧腿同相
-      const swing = 34 * Math.sin(ph);
-      const elbow = pt(sh, 90 + swing - 14, 4.2);               // 上臂略张
-      const hand = pt(elbow, 90 + swing + 26, 4.0);             // 前臂前摆
-      parts.push(seg(sh, elbow, { op: 0.7, w: 2.0 }), seg(elbow, hand, { op: 0.7, w: 2.0 }));
-    }
-    return `<g>${parts.join("")}</g>`;
-  }
-
-  function runnerRender() {
-    if (!runner.svg) return;   // 面板未打开时 svg 不存在,sync 的换档 kick 不应渲染
-    runner.svg.innerHTML = runnerSVG(runner.frame);
-  }
-
-  function runnerLoop(ts) {
-    if (!runner.raf) return;
-    const dt = runner.last ? Math.min(100, ts - runner.last) : 16;
-    runner.last = ts;
-    // 拖拽 420ms / 思考中 ~500ms / 空闲 720ms 循环
-    const step = state.drag ? DRAG_FRAME_MS : (state.thinking ? THINK_FRAME_MS : IDLE_FRAME_MS);
-    runner.progress += dt / step;
-    const f = Math.floor(runner.progress) % 8;
-    if (f !== runner.frame) { runner.frame = f; runnerRender(); }
-    runner.raf = requestAnimationFrame(runnerLoop);
-  }
-
-  function runnerSetMode() {
-    if (!runner.el || !runner.svg) return;
-    // 空闲 / 结束：定格在站立帧（frame 0）并停掉 rAF，回到稳定状态 —— 不再空转循环
-    if (REDUCED || (!state.drag && !state.thinking)) {
-      runnerStop();
-      runner.progress = 0;
-      if (runner.frame !== 0) { runner.frame = 0; runnerRender(); }
-      return;
-    }
-    if (!runner.raf) { runner.last = 0; runner.raf = requestAnimationFrame(runnerLoop); }
-  }
-
-  function runnerStop() {
-    if (runner.raf) cancelAnimationFrame(runner.raf);
-    runner.raf = 0; runner.last = 0;
   }
 
   // 辐射特效:换档确认时从「当前点亮的最后一段」中心发射一圈涟漪
@@ -568,17 +497,13 @@
       if (idx >= 0 && n > 1 && idx === n - 1) track.setAttribute("data-top", "1");
       else track.removeAttribute("data-top");
     }
-    // max 档泛光：旧版挂在填充条(inline animation)，分段后改由 CSS 落在最后一段(zsBreathe)
-    if (runner.el) runner.el.style.filter = `drop-shadow(${ec.glow})`;
+    // max 档泛光：由 CSS 落在最后一段填充层(zsBreathe)
   }
 
   function closePanel(animate) {
     if (!panel) return;
     const p = panel;
     panel = null;
-    runnerStop();      // 面板关闭即停小人动画(rAF 引用旧节点无意义)
-    runner.el = null;  // 必须置空引用:否则 sync 每秒调 setThinking→runnerSetMode 会在
-    runner.svg = null; // 已脱离文档的 svg 上重新拉起 rAF,一直空转到下次打开面板
     clearTimeout(phaseTimer);
     window.removeEventListener("resize", onViewportChange);
     window.removeEventListener("scroll", onViewportChange, true);
@@ -640,30 +565,15 @@
     head.appendChild(labelEl);
     p.appendChild(head);
 
-    // 滑条行 = [小人前缀图标] + [分段轨道]
+    // 滑条行 = 分段轨道（无前缀图标，轨道占满整行）
     track = document.createElement("div");
     track.className = "zslider-track";
     Object.assign(track.style, {
-      position: "relative", height: "30px",
+      position: "relative", height: "38px",
       cursor: "pointer", touchAction: "none",
     });
 
-    // ① 小人前缀图标：思考中跑步、空闲定格站立帧(不再跟随档位左右移动)
-    runner.el = document.createElement("div");
-    runner.el.className = "zslider-knob";
-    Object.assign(runner.el.style, {
-      width: "22px", height: "22px", flex: "0 0 auto",
-      pointerEvents: "none",
-      filter: "drop-shadow(0 0 5px rgba(77,157,255,0.5))",
-    });
-    runner.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    runner.svg.setAttribute("viewBox", "0 0 24 24");
-    Object.assign(runner.svg.style, { width: "100%", height: "100%", display: "block" });
-    runner.el.appendChild(runner.svg);
-    runnerRender();
-    track.appendChild(runner.el);
-
-    // ② 分段轨道:rail 是段容器(段间隙透出轨道渐变),段数由 segCount() 决定
+    // 分段轨道:rail 是段容器(段间隙透出轨道渐变),段数由 segCount() 决定
     rail = document.createElement("div");
     rail.className = "zslider-rail";
     Object.assign(rail.style, {
@@ -687,7 +597,7 @@
 
     // 拖拽/点击:指针横向位置 → 最近档位,松手提交
     const idxFromEvent = (e) => {
-      // 用 rail 的矩形:track 左侧现在多了小人前缀图标,用 track 算会把坐标整体右偏
+      // 用 rail 的矩形:rail 是轨道本体,横向坐标换算最直接
       const r = (rail || track).getBoundingClientRect();
       const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / Math.max(1, r.width)));
       const n = state.levels.length;
@@ -707,7 +617,6 @@
       tr.style.setProperty("--zs-dur", "0ms");
       setPhase("dragging");
       clearTimeout(phaseTimer);
-      runnerSetMode();   // 拖拽中小人跑起来(空闲时是定格的)
       try { track.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
       preview(idxFromEvent(e));
     });
@@ -722,8 +631,7 @@
       lastMoveX = null;
       track.classList.remove("is-dragging");
       tr.style.removeProperty("--zs-dur");   // 松手恢复弹性:逐段点亮重新带上 stagger
-      setPhase("settling");                  // 完成:小人回弹 + 涟漪(由 sync 触发)
-      runnerSetMode();                       // 非思考态 → 定格站立帧(回到稳定)
+      setPhase("settling");                  // 完成:涟漪(由 sync 触发)
       clearTimeout(phaseTimer);
       phaseTimer = setTimeout(() => setPhase("idle"), 520);
       try { track.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
@@ -743,13 +651,12 @@
       track.classList.remove("is-dragging");
       tr.style.removeProperty("--zs-dur");
       setPhase("settling");
-      runnerSetMode();
       clearTimeout(phaseTimer);
       phaseTimer = setTimeout(() => setPhase("idle"), 520);
       sync();
     });
 
-    // ←/→ 微调(面板聚焦时;小人随按键跑动)
+    // ←/→ 微调(面板聚焦时)
     p.addEventListener("keydown", (e) => {
       const n = state.levels.length;
       if (!n) return;
@@ -772,7 +679,7 @@
     window.addEventListener("resize", onViewportChange);
     window.addEventListener("scroll", onViewportChange, true);
     refreshPanel();
-    setThinking(detectThinking());   // 思考中 → 小人跑步 + 激活段流动;空闲 → 定格稳定
+    setThinking(detectThinking());   // 思考中 → 激活段流动;空闲 → 定格
     // 定位就绪后启动弹出动效;填充条同时从 0 扫到当前档位(扫光标出"加载中")
     p.style.animation = "zsliderIn 260ms cubic-bezier(0.2,0.9,0.25,1.15)";
     setPhase("loading");
@@ -905,7 +812,7 @@
         entryName.textContent = p.cur;
         entryName.style.color = idx >= 0 ? "" : "rgba(233,99,99,0.9)";   // 未知档位标红提示
         setMini(idx >= 0 ? idx : 0, p.levels.length);
-        // 换档确认:当前点亮段处发射涟漪 + 档名脉冲(小人是否跑动由 thinking/drag 决定)
+        // 换档确认:当前点亮段处发射涟漪 + 档名脉冲
         if (panel) rippleAt();
         if (panel && labelEl) {
           labelEl.style.animation = "none";

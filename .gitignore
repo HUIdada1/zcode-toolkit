@@ -38,3 +38,8 @@ apply_after_exit.log
 .box-agent/
 .box-agent-scratch/
 NVIDIA Corporation/
+
+# 本地视觉验收夹具与截图（临时验证产物，不入库）
+_smoke/
+.playwright-mcp/
+slider-panel-*.png
