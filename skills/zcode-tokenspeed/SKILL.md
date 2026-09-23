@@ -137,7 +137,8 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
   - `<数据>/cli/plugins/cache/<市场名>/<插件名>/<版本>/` —— GitHub/URL 来源，**插件根在版本目录里**
     （实测 `cache/zcode-plugins-official/computer-use/0.5.13/.zcode-plugin/plugin.json`）
   - `<数据>/cli/plugins/cache/<市场名>/plugins/<插件名>/` —— 市场仓库里带 `plugins/` 子目录时
-  - **缓存会堆积多个历史版本**（本机 `dev-default-22da16fd/zcode-patcher/` 下有 0.1.0/0.1.1/0.2.0/0.2.1），
+  - **缓存会堆积多个历史版本**（本机 `cache/zcode-toolkit/zcode-tokenspeed/` 下有 0.3.1、0.5.x 等，
+    更早还有 `dev-default-22da16fd/zcode-patcher/` 的 0.1.0/0.1.1/0.2.0/0.2.1），
     所以自检会报出全部命中项并按 mtime 提示最新的那份。
 - **配置键格式是 `<插件名>@<市场名>`**（实测 `computer-use@zcode-plugins-official`）——
   匹配时只认 `<插件名>@…`，别用裸 `startswith`。
@@ -190,11 +191,11 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 
 > **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题，与插件清单无关——界面拿到的插件信息里 `userConfig` 为空时，配置区整个不渲染（`Y2t` 组件里 `userConfig` 为空直接 `return null`）。清单本身是正确的（Agent 侧 `M5s` 完整解析、`f5s` 赋 `userConfig: e.manifest.userConfig`、`jGo` 条件展开，链路已逐环节核对）。此时**直接写配置文件**，效果完全一样：
 >
-> `~/.zcode/cli/config.json` → `plugins.options["zcode-tokenspeed@dev-default-22da16fd"]`：
+> `~/.zcode/cli/config.json` → `plugins.options["zcode-tokenspeed@<市场名>"]`（`@` 后面按实际安装的市场填；本机是 `zcode-toolkit`）：
 > ```json
 > "plugins": {
 >   "options": {
->     "zcode-tokenspeed@dev-default-22da16fd": { "tps_footer": false, "model_puller": true }
+>     "zcode-tokenspeed@zcode-toolkit": { "tps_footer": false, "model_puller": true }
 >   }
 > }
 > ```

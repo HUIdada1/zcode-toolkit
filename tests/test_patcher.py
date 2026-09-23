@@ -825,6 +825,60 @@ class TestMarketplaceManifest(unittest.TestCase):
                         f"source {src!r} 解析到 {target}，那里没有 .zcode-plugin/plugin.json")
 
 
+class TestCheckStateWording(unittest.TestCase):
+    """check_state() 必须认得每一套 `--check` 输出措辞。
+
+    锁死的是一个真实故障：`--reasoning-config --check` 打的是
+    「[ ] …（新建规则）」/「[=] 档位配置已是最新，无需写入」，一个
+    `已打 / 未打 / 不适用` 都没有 → 判定落回 unknown → sync 报
+    「未处理: reasoning_config(状态未知)」，这个开关**既不会被写入也不会被还原**。
+    注意不能用「已是最新」判 on：有待写入项时它也会打印（说的是另外 N 个已配好的模型）。
+    """
+
+    def _state(self, text: str) -> str:
+        import sync
+
+        class _R:
+            returncode = 0
+            stdout = text
+            stderr = ""
+
+        class _FakeSub:
+            run = staticmethod(lambda *a, **kw: _R())
+
+        orig = sync.subprocess
+        sync.subprocess = _FakeSub          # 只换 sync 里的名字，不动全局 subprocess
+        try:
+            return sync.check_state(["--reasoning-config"])
+        finally:
+            sync.subprocess = orig
+
+    def test_reasoning_config_pending_is_off(self):
+        out = ("=== 3.14+ 原生档位配置（provider_config.json），模式：检查 ===\n"
+               "    [ ] openai/tierflow  →  4 档 off/low/high/max  （新建规则，来源 config.optionSpecs）\n"
+               "    已是最新 12 个：a/b, c/d\n")
+        self.assertEqual(self._state(out), "off")
+
+    def test_reasoning_config_uptodate_is_on(self):
+        out = ("=== 3.14+ 原生档位配置（provider_config.json），模式：检查 ===\n"
+               "    已是最新 12 个：a/b, c/d\n"
+               "[=] F:\\ZcodeData\\.zcode\\v2\\provider_config.json\n"
+               "    档位配置已是最新，无需写入\n")
+        self.assertEqual(self._state(out), "on")
+
+    def test_kernel_not_applicable_wins_over_reasoning_branch(self):
+        """内核补丁的「不适用」必须优先判成 na（它的提示里也带「原生档位机制」）。"""
+        out = "    [i] 该内核使用 3.14+ 原生档位机制（optionSpecs），本补丁不适用："
+        self.assertEqual(self._state(out), "na")
+
+    def test_byte_level_wording_still_works(self):
+        self.assertEqual(self._state("    [=] a.js | 已打（每日趋势图）"), "on")
+        self.assertEqual(self._state("    [ ] a.js | 未打（每日趋势图）"), "off")
+
+    def test_unrecognized_output_is_unknown(self):
+        self.assertEqual(self._state("完全看不懂的输出"), "unknown")
+
+
 class TestInjectionBlocks(unittest.TestCase):
     """标记定界注入块：模型拉取与增强提示词共用 preload/main 锚点，必须互不干扰。"""
 

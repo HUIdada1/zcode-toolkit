@@ -296,7 +296,7 @@ python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --revert
 ```json
 "plugins": {
   "options": {
-    "zcode-tokenspeed@dev-default-22da16fd": { "tps_footer": true, "usage_chart": true }
+    "zcode-tokenspeed@zcode-toolkit": { "tps_footer": true, "usage_chart": true }
   }
 }
 ```

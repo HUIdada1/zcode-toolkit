@@ -197,6 +197,11 @@ def check_state(args) -> str:
     `na` 是必需的第三态：例如 ≤3.11 专用的内核补丁在 3.14+ 上会明确打印
     「本补丁不适用」。旧逻辑只看「未打」→ 把它当成 off → 去执行 → 脚本空转一圈，
     最后却报成「已生效」。默认值全开之后，这个误报每次装完都会出现，必须区分开。
+
+    `--reasoning-config` 是**另一套措辞**，必须单独识别：它不打 asar、只写
+    `provider_config.json`，输出是「[ ] …（新建规则）」/「[=] 档位配置已是最新，无需写入」，
+    一个 `已打/未打/不适用` 都没有。早期漏了这条分支 → 每次都判成 unknown →
+    报「未处理: reasoning_config(状态未知)」，于是这个开关**既不会被写入也不会被还原**。
     """
     r = subprocess.run([sys.executable, str(PATCHER), *args, "--check"],
                        capture_output=True, encoding="utf-8", errors="replace",
@@ -205,6 +210,11 @@ def check_state(args) -> str:
     out = (r.stdout or "") + (r.stderr or "")
     if "不适用" in out:
         return "na"
+    if "原生档位配置" in out:
+        # 「无需写入」只出现在「not planned」分支（档位配置已是最新）；
+        # 否则就是有 [ ] 待写入项 → off。别用「已是最新」判：该词在有待写入项时也会打印
+        # （指的是另外 N 个已配好的模型），会误判成 on。
+        return "on" if "无需写入" in out else "off"
     if "未打" in out:
         return "off"
     if "已打" in out:
